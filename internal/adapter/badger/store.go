@@ -137,3 +137,42 @@ func (s *Store) Delete(key string) error {
 		return err
 	})
 }
+
+// Reset deletes all keys in the BadgerDB store safely within write transactions.
+func (s *Store) Reset() error {
+	var keys [][]byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			k := it.Item().KeyCopy(nil)
+			keys = append(keys, k)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	const batchSize = 500
+	for i := 0; i < len(keys); i += batchSize {
+		end := i + batchSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+		batch := keys[i:end]
+		if err := s.db.Update(func(txn *badger.Txn) error {
+			for _, k := range batch {
+				if err := txn.Delete(k); err != nil && err != badger.ErrKeyNotFound {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}

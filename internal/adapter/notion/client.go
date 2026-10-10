@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"time"
 )
 
@@ -19,13 +21,15 @@ const (
 // Client is a thin wrapper around the Notion API.
 type Client struct {
 	token      string
+	baseURL    string
 	httpClient *http.Client
 }
 
 // NewClient creates a Notion API client.
 func NewClient(token string) *Client {
 	return &Client{
-		token: token,
+		token:   token,
+		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: requestTimeout,
 		},
@@ -43,7 +47,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}) 
 		reqBody = bytes.NewReader(b)
 	}
 
-	url := baseURL + path
+	url := c.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -105,6 +109,11 @@ func (c *Client) GetPage(ctx context.Context, pageID string) (json.RawMessage, e
 	return c.do(ctx, http.MethodGet, "/pages/"+pageID, nil)
 }
 
+// GetBlockChildren retrieves direct child blocks of a page or block.
+func (c *Client) GetBlockChildren(ctx context.Context, blockID string) (json.RawMessage, error) {
+	return c.do(ctx, http.MethodGet, "/blocks/"+blockID+"/children?page_size=100", nil)
+}
+
 // SearchPages searches for pages with a given title query.
 func (c *Client) SearchPages(ctx context.Context, query string) (json.RawMessage, error) {
 	payload := map[string]interface{}{
@@ -115,4 +124,72 @@ func (c *Client) SearchPages(ctx context.Context, query string) (json.RawMessage
 		},
 	}
 	return c.do(ctx, http.MethodPost, "/search", payload)
+}
+
+// CreateFileUpload creates a new single-part Notion file upload object and returns its ID.
+func (c *Client) CreateFileUpload(ctx context.Context, filename, contentType string) (string, error) {
+	payload := map[string]interface{}{
+		"filename":     filename,
+		"content_type": contentType,
+	}
+	raw, err := c.do(ctx, http.MethodPost, "/file_uploads", payload)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", fmt.Errorf("parse file upload response: %w", err)
+	}
+	if resp.ID == "" {
+		return "", fmt.Errorf("empty file upload id from Notion")
+	}
+	return resp.ID, nil
+}
+
+// SendFileUpload uploads the binary file contents to an existing Notion file upload object.
+func (c *Client) SendFileUpload(ctx context.Context, uploadID, filename, contentType string, data []byte) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename=%q`, filename))
+	if contentType != "" {
+		h.Set("Content-Type", contentType)
+	}
+	part, err := mw.CreatePart(h)
+	if err != nil {
+		return fmt.Errorf("create multipart part: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return fmt.Errorf("write file data: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/file_uploads/%s/send", c.baseURL, uploadID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
+	if err != nil {
+		return fmt.Errorf("create send file request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Notion-Version", notionVersion)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send file request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read send file response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("notion file upload send error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }

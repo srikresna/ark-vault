@@ -32,11 +32,12 @@ func (s *ReminderService) SetReminder(ctx context.Context, telegramID int64, cha
 		return fmt.Errorf("hour must be between 0 and 23, got %d", hour)
 	}
 	pref := &domain.ReminderPreference{
-		TelegramID: telegramID,
-		Enabled:    enabled,
-		Hour:       hour,
-		ChatID:     chatID,
-		ThreadID:   threadID,
+		TelegramID:  telegramID,
+		Enabled:     enabled,
+		Hour:        hour,
+		ChatID:      chatID,
+		ThreadID:    threadID,
+		IsCommunity: chatID < 0 || chatID != telegramID,
 	}
 	return s.store.SaveReminderPref(ctx, pref)
 }
@@ -63,8 +64,13 @@ func (s *ReminderService) GetDueReminders(ctx context.Context) ([]domain.Reminde
 		if pref.Hour != currentHour {
 			continue
 		}
+		if pref.IsCommunity || pref.ChatID < 0 {
+			pref.IsCommunity = true
+			due = append(due, pref)
+			continue
+		}
 
-		// Check if the user already logged a trade today.
+		// Personal DM reminder: check if the user already logged a trade today.
 		streak, err := s.streaks.GetStreak(ctx, pref.TelegramID)
 		if err != nil {
 			s.logger.Warn("failed to get streak for reminder check",

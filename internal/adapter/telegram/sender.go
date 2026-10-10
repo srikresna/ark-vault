@@ -15,20 +15,32 @@ import (
 
 // Sender implements ports.Messenger for Telegram.
 type Sender struct {
-	token  string
-	client *http.Client
+	token   string
+	baseAPI string
+	client  *http.Client
+}
+
+// BotCommand represents a Telegram bot command menu item.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
 }
 
 // NewSender creates a Telegram Sender.
 func NewSender(token string) *Sender {
 	return &Sender{
-		token:  token,
-		client: &http.Client{Timeout: 15 * time.Second},
+		token:   token,
+		baseAPI: telegramAPI,
+		client:  &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
 func (s *Sender) apiURL(method string) string {
-	return fmt.Sprintf("%s%s/%s", telegramAPI, s.token, method)
+	base := s.baseAPI
+	if base == "" {
+		base = telegramAPI
+	}
+	return fmt.Sprintf("%s%s/%s", base, s.token, method)
 }
 
 func (s *Sender) call(ctx context.Context, method string, payload interface{}) (json.RawMessage, error) {
@@ -249,4 +261,50 @@ func buildKeyboard(rows [][]ports.InlineButton) map[string]interface{} {
 	return map[string]interface{}{
 		"inline_keyboard": tgRows,
 	}
+}
+
+// SetMyCommands sets the Telegram command menu for a given scope.
+func (s *Sender) SetMyCommands(ctx context.Context, commands []BotCommand, scope map[string]interface{}) error {
+	payload := map[string]interface{}{
+		"commands": commands,
+	}
+	if scope != nil {
+		payload["scope"] = scope
+	}
+	_, err := s.call(ctx, "setMyCommands", payload)
+	return err
+}
+
+// RegisterCommandScopes registers public commands for everyone and includes /reset only for the owner's private chat scope.
+func (s *Sender) RegisterCommandScopes(ctx context.Context, ownerID int64) error {
+	publicCmds := []BotCommand{
+		{Command: "journal", Description: "Catat trade (guided flow)"},
+		{Command: "stats", Description: "Statistik trading"},
+		{Command: "leaderboard", Description: "Top 10 trader komunitas"},
+		{Command: "profile", Description: "Profil level, XP & streak"},
+		{Command: "badges", Description: "Koleksi badge pencapaian"},
+		{Command: "challenge", Description: "Weekly challenge & klasemen"},
+		{Command: "goal", Description: "Target bulanan & progress"},
+		{Command: "reminder", Description: "Atur pengingat jurnal harian"},
+		{Command: "analyze", Description: "Analisis trading dengan AI"},
+		{Command: "reportcard", Description: "Rapor bulanan trader"},
+		{Command: "export", Description: "Export jurnal ke CSV/PDF"},
+		{Command: "report", Description: "Ringkasan mingguan komunitas"},
+		{Command: "help", Description: "Panduan penggunaan bot"},
+	}
+	if err := s.SetMyCommands(ctx, publicCmds, map[string]interface{}{"type": "default"}); err != nil {
+		return err
+	}
+	if ownerID > 0 {
+		ownerCmds := append([]BotCommand{}, publicCmds...)
+		ownerCmds = append(ownerCmds, BotCommand{
+			Command:     "reset",
+			Description: "Reset semua data BadgerDB & Notion (Owner Only)",
+		})
+		_ = s.SetMyCommands(ctx, ownerCmds, map[string]interface{}{
+			"type":    "chat",
+			"chat_id": ownerID,
+		})
+	}
+	return nil
 }

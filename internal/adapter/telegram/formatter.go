@@ -102,9 +102,14 @@ func FormatTradeConfirmation(t *domain.Trade) string {
 	return sb.String()
 }
 
-// FormatHelp returns the /help message.
+// FormatHelp returns the public /help message.
 func FormatHelp() string {
-	return `🔐 <b>ARK Vault — Help</b>
+	return FormatHelpForUser(false)
+}
+
+// FormatHelpForUser returns the /help message, showing owner-only commands only when isOwner is true.
+func FormatHelpForUser(isOwner bool) string {
+	help := `🔐 <b>ARK Vault — Help</b>
 
 <b>Mencatat Trade:</b>
 • /journal — Guided flow (step-by-step dengan tombol)
@@ -129,11 +134,11 @@ Confluence: FVG + OB mitigation on 15m</pre>
 • /report — Summary report minggu ini
 
 <b>Lainnya:</b>
-• /profile — Profil & level gamifikasi
+• /profile — Profil &amp; level gamifikasi
 • /badges — Koleksi badge
-• /challenge — Weekly challenge & standings
+• /challenge — Weekly challenge &amp; standings
 • /reminder — Atur daily reminder
-• /goal — Monthly goal & progress
+• /goal — Monthly goal &amp; progress
 • /analyze — AI trade analytics
 • /reportcard — Monthly report card
 • /help — Tampilkan pesan ini
@@ -142,6 +147,10 @@ Confluence: FVG + OB mitigation on 15m</pre>
 • RR bisa: +2, -1, 0 (BE), atau WIN 2RR, LOSS 1RR, BE
 • Kalau RR kosong, trade dicatat sebagai OPEN
 • Session: Asia, London, NY AM, NY PM`
+	if isOwner {
+		help += "\n\n<b>Owner Only:</b>\n• /reset — Reset semua data BadgerDB &amp; Notion"
+	}
+	return help
 }
 
 // FormatWeeklySummary formats a weekly community report as HTML.
@@ -403,6 +412,13 @@ func FormatDailyReminder(streakDays int) string {
 	}
 	sb.WriteString("\nGunakan /journal untuk mulai.")
 	return sb.String()
+}
+
+// FormatCommunityReminder formats the daily reminder message sent to a community group/thread.
+func FormatCommunityReminder() string {
+	return "📝 <b>Community Reminder: Jangan lupa jurnal hari ini!</b>\n\n" +
+		"Sudahkah kalian mencatat setup &amp; hasil trade hari ini?\n" +
+		"Gunakan /journal atau <code>#journal</code> untuk menjaga disiplin trading kita bersama! 💪"
 }
 
 // FormatGoalHelp shows goal usage.

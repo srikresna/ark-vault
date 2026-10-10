@@ -99,18 +99,36 @@ func (s *GamificationService) OnTradeRecorded(ctx context.Context, memberID int6
 	streak.LastLogDate = today
 	streak.UpdatedAt = now
 
-	// 5. Calculate XP
+	// 5. Calculate XP (subject to daily trade XP cap)
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, wib)
+	todayEvents, err := s.store.GetXPEvents(ctx, memberID, todayStart)
+	if err != nil {
+		return nil, err
+	}
+	tradeXPCountToday := 0
+	for _, ev := range todayEvents {
+		if ev.Reason == "trade_recorded" {
+			tradeXPCountToday++
+		}
+	}
+
 	totalXP := 0
+	if tradeXPCountToday < domain.MaxDailyTradeXPCount {
+		// Trade logged
+		totalXP += domain.XPTradeLogged
 
-	// Always: trade logged
-	totalXP += domain.XPTradeLogged
+		// Win bonuses
+		if trade.Status == domain.StatusWin {
+			if trade.ResultRR >= 2 {
+				totalXP += domain.XPWinHighRR
+			} else {
+				totalXP += domain.XPWinBonus
+			}
+		}
 
-	// Win bonuses
-	if trade.Status == domain.StatusWin {
-		if trade.ResultRR >= 2 {
-			totalXP += domain.XPWinHighRR
-		} else {
-			totalXP += domain.XPWinBonus
+		// Screenshot bonus
+		if trade.ScreenshotURL != "" {
+			totalXP += domain.XPScreenshot
 		}
 	}
 
@@ -127,13 +145,8 @@ func (s *GamificationService) OnTradeRecorded(ctx context.Context, memberID int6
 		}
 	}
 
-	// Screenshot bonus
-	if trade.ScreenshotURL != "" {
-		totalXP += domain.XPScreenshot
-	}
-
 	// 6. Update profile
-	oldLevel := profile.Level
+	oldLevel, _ := domain.LevelForXP(profile.TotalXP)
 	profile.TotalXP += totalXP
 	profile.Level, profile.Title = domain.LevelForXP(profile.TotalXP)
 	profile.UpdatedAt = now
@@ -145,13 +158,15 @@ func (s *GamificationService) OnTradeRecorded(ctx context.Context, memberID int6
 	if err := s.store.SaveStreak(ctx, streak); err != nil {
 		return nil, err
 	}
-	if err := s.store.AppendXPEvent(ctx, &domain.XPEvent{
-		TelegramID: memberID,
-		Amount:     totalXP,
-		Reason:     "trade_recorded",
-		Timestamp:  now,
-	}); err != nil {
-		return nil, err
+	if totalXP > 0 {
+		if err := s.store.AppendXPEvent(ctx, &domain.XPEvent{
+			TelegramID: memberID,
+			Amount:     totalXP,
+			Reason:     "trade_recorded",
+			Timestamp:  now,
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	// 8. Return result
@@ -207,6 +222,8 @@ func (s *GamificationService) GetProfile(ctx context.Context, memberID int64) (*
 			Title:      "Retail",
 			UpdatedAt:  time.Now().In(wib),
 		}
+	} else {
+		profile.Level, profile.Title = domain.LevelForXP(profile.TotalXP)
 	}
 	return profile, nil
 }

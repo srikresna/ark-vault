@@ -9,55 +9,63 @@ import (
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
 
-// mockGamificationStore is a test double for GamificationStore
 type mockGamificationStore struct {
-	xpLogs   map[int64][]domain.XPLog
-	streaks  map[int64]domain.Streak
-	lifetime map[int64]domain.LifetimeXP
+	profiles map[int64]*domain.GamificationProfile
+	streaks  map[int64]*domain.StreakData
+	events   map[int64][]domain.XPEvent
 }
 
 func newMockGamificationStore() *mockGamificationStore {
 	return &mockGamificationStore{
-		xpLogs:   make(map[int64][]domain.XPLog),
-		streaks:  make(map[int64]domain.Streak),
-		lifetime: make(map[int64]domain.LifetimeXP),
+		profiles: make(map[int64]*domain.GamificationProfile),
+		streaks:  make(map[int64]*domain.StreakData),
+		events:   make(map[int64][]domain.XPEvent),
 	}
 }
 
-func (m *mockGamificationStore) GetXPLogs(ctx context.Context, memberID int64, since time.Time) ([]domain.XPLog, error) {
-	return m.xpLogs[memberID], nil
-}
-
-func (m *mockGamificationStore) AppendXPLog(ctx context.Context, memberID int64, log domain.XPLog) error {
-	m.xpLogs[memberID] = append(m.xpLogs[memberID], log)
-	return nil
-}
-
-func (m *mockGamificationStore) GetStreak(ctx context.Context, memberID int64) (domain.Streak, error) {
-	if s, ok := m.streaks[memberID]; ok {
-		return s, nil
+func (m *mockGamificationStore) GetProfile(ctx context.Context, telegramID int64) (*domain.GamificationProfile, error) {
+	if p, ok := m.profiles[telegramID]; ok {
+		cp := *p
+		return &cp, nil
 	}
-	return domain.Streak{}, nil
+	return nil, nil
 }
 
-func (m *mockGamificationStore) SetStreak(ctx context.Context, memberID int64, s domain.Streak) error {
-	m.streaks[memberID] = s
+func (m *mockGamificationStore) SaveProfile(ctx context.Context, profile *domain.GamificationProfile) error {
+	cp := *profile
+	m.profiles[profile.TelegramID] = &cp
 	return nil
 }
 
-func (m *mockGamificationStore) GetLifetimeXP(ctx context.Context, memberID int64) (domain.LifetimeXP, error) {
-	if l, ok := m.lifetime[memberID]; ok {
-		return l, nil
+func (m *mockGamificationStore) GetStreak(ctx context.Context, telegramID int64) (*domain.StreakData, error) {
+	if s, ok := m.streaks[telegramID]; ok {
+		cp := *s
+		return &cp, nil
 	}
-	return domain.LifetimeXP{}, nil
+	return nil, nil
 }
 
-func (m *mockGamificationStore) SetLifetimeXP(ctx context.Context, memberID int64, l domain.LifetimeXP) error {
-	m.lifetime[memberID] = l
+func (m *mockGamificationStore) SaveStreak(ctx context.Context, streak *domain.StreakData) error {
+	cp := *streak
+	m.streaks[streak.TelegramID] = &cp
 	return nil
 }
 
-// mockTradeRepo for testing
+func (m *mockGamificationStore) AppendXPEvent(ctx context.Context, event *domain.XPEvent) error {
+	m.events[event.TelegramID] = append(m.events[event.TelegramID], *event)
+	return nil
+}
+
+func (m *mockGamificationStore) GetXPEvents(ctx context.Context, telegramID int64, since time.Time) ([]domain.XPEvent, error) {
+	var out []domain.XPEvent
+	for _, ev := range m.events[telegramID] {
+		if !ev.Timestamp.Before(since) {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
 type mockGamificationTradeRepo struct {
 	trades map[int64][]domain.Trade
 }
@@ -70,18 +78,22 @@ func (m *mockGamificationTradeRepo) GetTrades(ctx context.Context, memberID int6
 	return m.trades[memberID], nil
 }
 
-func (m *mockGamificationTradeRepo) SaveTrade(ctx context.Context, memberID int64, trade domain.Trade) error {
-	m.trades[memberID] = append(m.trades[memberID], trade)
+func (m *mockGamificationTradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain.Trade) error {
+	m.trades[memberID] = append(m.trades[memberID], *trade)
 	return nil
 }
 
-// mockMemberRepo for testing
 type mockGamificationMemberRepo struct {
 	members map[int64]*domain.Member
 }
 
 func newMockGamificationMemberRepo() *mockGamificationMemberRepo {
 	return &mockGamificationMemberRepo{members: make(map[int64]*domain.Member)}
+}
+
+func (m *mockGamificationMemberRepo) EnsureMember(ctx context.Context, member *domain.Member) (*domain.Member, error) {
+	m.members[member.TelegramID] = member
+	return member, nil
 }
 
 func (m *mockGamificationMemberRepo) GetMember(ctx context.Context, tgID int64) (*domain.Member, error) {
@@ -91,176 +103,82 @@ func (m *mockGamificationMemberRepo) GetMember(ctx context.Context, tgID int64) 
 	return nil, errors.New("member not found")
 }
 
-func (m *mockGamificationMemberRepo) SaveMember(ctx context.Context, member *domain.Member) error {
-	m.members[member.TelegramID] = member
-	return nil
+func (m *mockGamificationMemberRepo) ListMembers(ctx context.Context) ([]domain.Member, error) {
+	var out []domain.Member
+	for _, member := range m.members {
+		out = append(out, *member)
+	}
+	return out, nil
 }
 
-func (m *mockGamificationMemberRepo) GetOrCreateMember(ctx context.Context, tgID int64, username string) (*domain.Member, error) {
-	if member, ok := m.members[tgID]; ok {
-		return member, nil
-	}
-	member := &domain.Member{TelegramID: tgID, Username: username}
-	m.members[tgID] = member
-	return member, nil
-}
-
-func TestGamificationService_OnTradeResult_Win(t *testing.T) {
-	store := newMockGamificationStore()
-	tradesRepo := newMockGamificationTradeRepo()
-	membersRepo := newMockGamificationMemberRepo()
-
-	svc := NewGamificationService(store, tradesRepo, membersRepo)
-
-	ctx := context.Background()
-	memberID := int64(12345)
-
-	trade := domain.Trade{
-		ID:       "trade-1",
-		Date:     time.Now(),
-		Symbol:   "BTC",
-		Status:   domain.Win,
-		ResultRR: 2.5,
-	}
-
-	result, err := svc.OnTradeResult(ctx, memberID, trade)
-	if err != nil {
-		t.Fatalf("OnTradeResult failed: %v", err)
-	}
-
-	// Verify XP gained for a win
-	if result.XPGained <= 0 {
-		t.Errorf("Expected positive XP for win, got %d", result.XPGained)
-	}
-
-	// Verify level calculation
-	if result.Level < 1 {
-		t.Errorf("Expected level >= 1, got %d", result.Level)
-	}
-
-	// Verify streak increased
-	if result.Streak < 1 {
-		t.Errorf("Expected streak >= 1, got %d", result.Streak)
-	}
-}
-
-func TestGamificationService_OnTradeResult_Loss(t *testing.T) {
-	store := newMockGamificationStore()
-	tradesRepo := newMockGamificationTradeRepo()
-	membersRepo := newMockGamificationMemberRepo()
-
-	svc := NewGamificationService(store, tradesRepo, membersRepo)
-
-	ctx := context.Background()
-	memberID := int64(12345)
-
-	trade := domain.Trade{
-		ID:       "trade-1",
-		Date:     time.Now(),
-		Symbol:   "BTC",
-		Status:   domain.Loss,
-		ResultRR: -1.0,
-	}
-
-	result, err := svc.OnTradeResult(ctx, memberID, trade)
-	if err != nil {
-		t.Fatalf("OnTradeResult failed: %v", err)
-	}
-
-	// Verify XP gained for a loss (should be less than win)
-	if result.XPGained < 0 {
-		t.Errorf("Expected non-negative XP for loss, got %d", result.XPGained)
-	}
-}
-
-func TestGamificationService_StreakContinuation(t *testing.T) {
-	store := newMockGamificationStore()
-	tradesRepo := newMockGamificationTradeRepo()
-	membersRepo := newMockGamificationMemberRepo()
-
-	svc := NewGamificationService(store, tradesRepo, membersRepo)
-
-	ctx := context.Background()
-	memberID := int64(12345)
-
-	// Set initial streak
-	store.streaks[memberID] = domain.Streak{
-		Current: 3,
-		Best:    5,
-	}
-
-	trade := domain.Trade{
-		ID:       "trade-1",
-		Date:     time.Now(),
-		Symbol:   "BTC",
-		Status:   domain.Win,
-		ResultRR: 1.5,
-	}
-
-	result, err := svc.OnTradeResult(ctx, memberID, trade)
-	if err != nil {
-		t.Fatalf("OnTradeResult failed: %v", err)
-	}
-
-	// Streak should continue from previous value
-	if result.Streak <= 3 {
-		t.Errorf("Expected streak to continue from 3, got %d", result.Streak)
-	}
-}
-
-func TestCalculateLevelAndTitle(t *testing.T) {
+func TestLevelForXP_HardcoreThresholds(t *testing.T) {
 	tests := []struct {
-		xp           int
-		wantLevel    int
-		wantTitleMin string // minimum title to expect
+		xp        int
+		wantLevel int
+		wantTitle string
 	}{
-		{0, 1, "Novice"},
-		{100, 1, "Novice"},
-		{500, 2, "Apprentice"},
-		{1500, 4, "Journeyman"},
-		{5000, 7, "Analyst"},
-		{20000, 11, "Fund Manager"},
+		{0, 1, "Retail"},
+		{299, 1, "Retail"},
+		{300, 2, "Chartist"},
+		{999, 2, "Chartist"},
+		{1000, 3, "Analyst"},
+		{2500, 4, "Strategist"},
+		{5000, 5, "Systematic"},
+		{9000, 6, "Algorithmic"},
+		{15000, 7, "Quantitative"},
+		{23000, 8, "Portfolio Manager"},
+		{35000, 9, "Fund Manager"},
+		{50000, 10, "Market Maker"},
+		{75000, 10, "Market Maker"},
 	}
 
 	for _, tt := range tests {
-		level, title := calculateLevelAndTitle(tt.xp)
-		if level != tt.wantLevel {
-			t.Errorf("calculateLevelAndTitle(%d) level = %d, want %d", tt.xp, level, tt.wantLevel)
-		}
-		if title == "" {
-			t.Errorf("calculateLevelAndTitle(%d) title should not be empty", tt.xp)
+		level, title := domain.LevelForXP(tt.xp)
+		if level != tt.wantLevel || title != tt.wantTitle {
+			t.Errorf("LevelForXP(%d) = (%d, %q), want (%d, %q)", tt.xp, level, title, tt.wantLevel, tt.wantTitle)
 		}
 	}
 }
 
-func TestGamificationService_GetStats(t *testing.T) {
+func TestGamificationService_DailyTradeXPCap(t *testing.T) {
 	store := newMockGamificationStore()
 	tradesRepo := newMockGamificationTradeRepo()
 	membersRepo := newMockGamificationMemberRepo()
-
 	svc := NewGamificationService(store, tradesRepo, membersRepo)
 
 	ctx := context.Background()
 	memberID := int64(12345)
 
-	// Pre-populate some XP
-	store.lifetime[memberID] = domain.LifetimeXP{Total: 1000}
-	store.streaks[memberID] = domain.Streak{Current: 5, Best: 10}
+	trade := &domain.Trade{
+		ID:       "trade-1",
+		Date:     time.Now().In(wib),
+		Symbol:   "XAUUSD",
+		Status:   domain.StatusWin,
+		ResultRR: 2.5,
+	}
 
-	stats, err := svc.GetStats(ctx, memberID)
+	// Trades 1, 2, 3 on the same day should award trade XP
+	for i := 1; i <= 3; i++ {
+		res, err := svc.OnTradeRecorded(ctx, memberID, trade)
+		if err != nil {
+			t.Fatalf("trade %d OnTradeRecorded failed: %v", i, err)
+		}
+		if res.XPGained <= 0 {
+			t.Errorf("trade %d expected XPGained > 0, got %d", i, res.XPGained)
+		}
+	}
+
+	xpAfter3 := store.profiles[memberID].TotalXP
+
+	// 4th trade on the same day should hit the daily trade XP cap (0 XP gained)
+	res4, err := svc.OnTradeRecorded(ctx, memberID, trade)
 	if err != nil {
-		t.Fatalf("GetStats failed: %v", err)
+		t.Fatalf("trade 4 OnTradeRecorded failed: %v", err)
 	}
-
-	if stats.TotalXP != 1000 {
-		t.Errorf("Expected TotalXP = 1000, got %d", stats.TotalXP)
+	if res4.XPGained != 0 {
+		t.Errorf("trade 4 on same day should grant 0 XP due to daily cap, got %d", res4.XPGained)
 	}
-
-	if stats.CurrentStreak != 5 {
-		t.Errorf("Expected CurrentStreak = 5, got %d", stats.CurrentStreak)
-	}
-
-	if stats.BestStreak != 10 {
-		t.Errorf("Expected BestStreak = 10, got %d", stats.BestStreak)
+	if res4.TotalXP != xpAfter3 {
+		t.Errorf("TotalXP after capped 4th trade = %d, want %d", res4.TotalXP, xpAfter3)
 	}
 }

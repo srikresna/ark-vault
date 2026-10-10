@@ -28,6 +28,16 @@ type Services struct {
 	ReportCard   *service.ReportCardService
 }
 
+// Resetter resets all BadgerDB state.
+type Resetter interface {
+	Reset() error
+}
+
+// NotionResetter archives all Notion member pages and clears the member cache.
+type NotionResetter interface {
+	ResetAll(ctx context.Context) (int, error)
+}
+
 // Handler routes incoming Telegram updates to the appropriate logic.
 type Handler struct {
 	sender           *Sender
@@ -36,6 +46,7 @@ type Handler struct {
 	exporter         ports.Exporter
 	trades           ports.TradeRepository
 	members          ports.MemberRepository
+	resetter         Resetter
 	guided           *GuidedFlow
 	limiter          *RateLimiter
 	logger           *slog.Logger
@@ -74,6 +85,11 @@ func NewHandler(
 // SetBot sets the Bot reference (needed for file downloads).
 func (h *Handler) SetBot(b *Bot) {
 	h.bot = b
+}
+
+// SetResetter sets the BadgerDB store resetter for owner-only /reset.
+func (h *Handler) SetResetter(r Resetter) {
+	h.resetter = r
 }
 
 // isAuthorized checks if the user is a member of the community group.
@@ -164,7 +180,8 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 	case strings.HasPrefix(text, "/report"):
 		h.cmdReport(ctx, msg)
 	case strings.HasPrefix(text, "/help"), strings.HasPrefix(text, "/start"):
-		h.sender.SendHTML(ctx, msg.Chat.ID, FormatHelp(), msg.MessageThreadID)
+		isOwner := msg.From != nil && h.ownerID > 0 && msg.From.ID == h.ownerID
+		h.sender.SendHTML(ctx, msg.Chat.ID, FormatHelpForUser(isOwner), msg.MessageThreadID)
 	case strings.HasPrefix(text, "/profile"):
 		h.cmdProfile(ctx, msg)
 	case strings.HasPrefix(text, "/badges"):
@@ -179,6 +196,8 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 		h.cmdAnalyze(ctx, msg)
 	case strings.HasPrefix(text, "/reportcard"):
 		h.cmdReportCard(ctx, msg)
+	case strings.HasPrefix(text, "/reset"):
+		h.cmdReset(ctx, msg, text)
 	case strings.HasPrefix(text, "#journal"):
 		h.handleTextJournal(ctx, msg, text)
 	}
@@ -419,6 +438,20 @@ func (h *Handler) cmdProfile(ctx context.Context, msg *Message) {
 func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
 	h.sender.AnswerCallback(ctx, cb.ID, "")
 
+	data := cb.Data
+	if data == "reset:confirm" || data == "reset:cancel" {
+		if cb.From == nil || h.ownerID == 0 || cb.From.ID != h.ownerID || cb.Message == nil {
+			return
+		}
+		if data == "reset:cancel" {
+			h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, "❌ Reset dibatalkan.")
+			return
+		}
+		h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, "⏳ Mereset seluruh data BadgerDB &amp; Notion...")
+		h.executeReset(ctx, cb.Message.Chat.ID, cb.Message.MessageThreadID)
+		return
+	}
+
 	// Community gate
 	if cb.Message != nil && !h.isAuthorized(ctx, cb.From.ID, cb.Message.Chat.ID, cb.Message.MessageThreadID, cb.Message.Chat.Type) {
 		return
@@ -428,9 +461,6 @@ func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
 	if session == nil {
 		return
 	}
-
-	data := cb.Data
-
 	// Handle confirm actions WITHOUT holding session.mu to avoid deadlock
 	// (submitGuidedTrade acquires session.mu internally)
 	switch {
@@ -709,6 +739,14 @@ func (h *Handler) cmdReminder(ctx context.Context, msg *Message, text string) {
 	if msg.From == nil || h.svc.Reminder == nil {
 		return
 	}
+	isCommunity := msg.Chat.Type != "private"
+	targetID := msg.From.ID
+	label := "Daily reminder"
+	if isCommunity {
+		targetID = msg.Chat.ID
+		label = "Community reminder"
+	}
+
 	parts := strings.Fields(text)
 
 	if len(parts) >= 2 {
@@ -721,19 +759,19 @@ func (h *Handler) cmdReminder(ctx context.Context, msg *Message, text string) {
 					hourVal = parsed
 				}
 			}
-			err := h.svc.Reminder.SetReminder(ctx, msg.From.ID, msg.Chat.ID, msg.MessageThreadID, true, hourVal)
+			err := h.svc.Reminder.SetReminder(ctx, targetID, msg.Chat.ID, msg.MessageThreadID, true, hourVal)
 			if err != nil {
 				h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal mengatur reminder.", msg.MessageThreadID)
 				return
 			}
-			h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔔 Daily reminder diaktifkan jam <b>%02d:00 WIB</b>", hourVal), msg.MessageThreadID)
+			h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔔 %s diaktifkan jam <b>%02d:00 WIB</b>", label, hourVal), msg.MessageThreadID)
 		case "off":
-			err := h.svc.Reminder.SetReminder(ctx, msg.From.ID, msg.Chat.ID, msg.MessageThreadID, false, 0)
+			err := h.svc.Reminder.SetReminder(ctx, targetID, msg.Chat.ID, msg.MessageThreadID, false, 0)
 			if err != nil {
 				h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal mengatur reminder.", msg.MessageThreadID)
 				return
 			}
-			h.sender.SendText(ctx, msg.Chat.ID, "🔕 Daily reminder dinonaktifkan.", msg.MessageThreadID)
+			h.sender.SendText(ctx, msg.Chat.ID, fmt.Sprintf("🔕 %s dinonaktifkan.", label), msg.MessageThreadID)
 		default:
 			h.sender.SendHTML(ctx, msg.Chat.ID, FormatReminderHelp(), msg.MessageThreadID)
 		}
@@ -741,12 +779,12 @@ func (h *Handler) cmdReminder(ctx context.Context, msg *Message, text string) {
 	}
 
 	// Show current status
-	pref, err := h.svc.Reminder.GetReminder(ctx, msg.From.ID)
+	pref, err := h.svc.Reminder.GetReminder(ctx, targetID)
 	if err != nil || pref == nil || !pref.Enabled {
-		h.sender.SendHTML(ctx, msg.Chat.ID, "🔕 Daily reminder belum aktif.\n\nGunakan <code>/reminder on</code> untuk mengaktifkan.\nGunakan <code>/reminder on 19</code> untuk jam 19:00 WIB.", msg.MessageThreadID)
+		h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔕 %s belum aktif.\n\nGunakan <code>/reminder on</code> untuk mengaktifkan.\nGunakan <code>/reminder on 19</code> untuk jam 19:00 WIB.", label), msg.MessageThreadID)
 		return
 	}
-	h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔔 Reminder aktif: <b>%02d:00 WIB</b>\n\nGunakan <code>/reminder off</code> untuk menonaktifkan.", pref.Hour), msg.MessageThreadID)
+	h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔔 %s aktif: <b>%02d:00 WIB</b>\n\nGunakan <code>/reminder off</code> untuk menonaktifkan.", label, pref.Hour), msg.MessageThreadID)
 }
 
 // cmdGoal handles /goal, /goal set <type> <target>
@@ -853,4 +891,49 @@ func (h *Handler) cmdReportCard(ctx context.Context, msg *Message) {
 		h.sender.DeleteMessage(ctx, msg.Chat.ID, waitMsgID)
 	}
 	h.sender.SendHTML(ctx, msg.Chat.ID, FormatMonthlyReportCard(report), msg.MessageThreadID)
+}
+
+// cmdReset handles the owner-only /reset command. Non-owners are silently ignored.
+func (h *Handler) cmdReset(ctx context.Context, msg *Message, text string) {
+	if msg.From == nil || h.ownerID == 0 || msg.From.ID != h.ownerID {
+		return // invisible to non-owners
+	}
+	parts := strings.Fields(text)
+	if len(parts) >= 2 && strings.EqualFold(parts[1], "confirm") {
+		h.executeReset(ctx, msg.Chat.ID, msg.MessageThreadID)
+		return
+	}
+	rows := [][]ports.InlineButton{
+		{
+			{Text: "✅ Ya, Reset Semua", CallbackData: "reset:confirm"},
+			{Text: "❌ Batal", CallbackData: "reset:cancel"},
+		},
+	}
+	prompt := "⚠️ <b>Konfirmasi Reset Total (Owner Only)</b>\n\n" +
+		"Tindakan ini akan:\n" +
+		"1. Menghapus seluruh data gamifikasi, XP, level, streak, badge, challenge, goal, reminder &amp; cache AI di <b>BadgerDB</b>.\n" +
+		"2. Mengarsipkan seluruh halaman jurnal member &amp; database trade di <b>Notion</b>.\n\n" +
+		"Apakah Anda yakin?"
+	h.sender.SendWithKeyboard(ctx, msg.Chat.ID, prompt, rows, msg.MessageThreadID)
+}
+
+func (h *Handler) executeReset(ctx context.Context, chatID int64, threadID int) {
+	archivedCount := 0
+	if nr, ok := h.members.(NotionResetter); ok && nr != nil {
+		n, err := nr.ResetAll(ctx)
+		archivedCount = n
+		if err != nil {
+			h.logger.Error("notion reset failed", "error", err)
+			h.sender.SendText(ctx, chatID, fmt.Sprintf("⚠️ Sebagian reset Notion gagal (%d diarsipkan): %v", archivedCount, err), threadID)
+		}
+	}
+	if h.resetter != nil {
+		if err := h.resetter.Reset(); err != nil {
+			h.logger.Error("badger reset failed", "error", err)
+			h.sender.SendText(ctx, chatID, "❌ Gagal mereset BadgerDB: "+err.Error(), threadID)
+			return
+		}
+	}
+	msg := fmt.Sprintf("✅ <b>Reset selesai!</b>\n\n• BadgerDB: seluruh data gamifikasi &amp; cache dihapus\n• Notion: <b>%d</b> halaman jurnal diarsipkan", archivedCount)
+	h.sender.SendHTML(ctx, chatID, msg, threadID)
 }

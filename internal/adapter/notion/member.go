@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
@@ -250,4 +251,86 @@ func (r *MemberRepo) createTradeDatabase(ctx context.Context, parentPageID strin
 		return "", err
 	}
 	return dbResp.ID, nil
+}
+
+func normalizeNotionID(id string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(id), "-", ""))
+}
+
+// ResetAll archives all member journal pages under the configured parent page and clears the cache.
+func (r *MemberRepo) ResetAll(ctx context.Context) (int, error) {
+	toArchive := make(map[string]bool)
+	normParent := normalizeNotionID(r.parentID)
+
+	// 1. Direct children of parent page
+	if r.parentID != "" {
+		if raw, err := r.client.GetBlockChildren(ctx, r.parentID); err == nil {
+			var children struct {
+				Results []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Archived bool   `json:"archived"`
+				} `json:"results"`
+			}
+			if json.Unmarshal(raw, &children) == nil {
+				for _, blk := range children.Results {
+					if !blk.Archived && (blk.Type == "child_page" || blk.Type == "child_database") && blk.ID != "" {
+						toArchive[blk.ID] = true
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Search pages matching "Trade Journal" under parent page
+	if raw, err := r.client.SearchPages(ctx, "Trade Journal"); err == nil {
+		var searchResp struct {
+			Results []struct {
+				ID       string `json:"id"`
+				Archived bool   `json:"archived"`
+				Parent   struct {
+					Type   string `json:"type"`
+					PageID string `json:"page_id"`
+				} `json:"parent"`
+			} `json:"results"`
+		}
+		if json.Unmarshal(raw, &searchResp) == nil {
+			for _, p := range searchResp.Results {
+				if p.Archived || p.ID == "" {
+					continue
+				}
+				if normParent == "" || normalizeNotionID(p.Parent.PageID) == normParent {
+					toArchive[p.ID] = true
+				}
+			}
+		}
+	}
+
+	// 3. Also include any cached member page IDs
+	r.mu.RLock()
+	for _, m := range r.cache {
+		if m != nil && m.NotionPageID != "" {
+			toArchive[m.NotionPageID] = true
+		}
+	}
+	r.mu.RUnlock()
+
+	archivedCount := 0
+	var firstErr error
+	for pageID := range toArchive {
+		_, err := r.client.UpdatePage(ctx, pageID, map[string]interface{}{"archived": true})
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		archivedCount++
+	}
+
+	r.mu.Lock()
+	r.cache = make(map[int64]*domain.Member)
+	r.mu.Unlock()
+
+	return archivedCount, firstErr
 }

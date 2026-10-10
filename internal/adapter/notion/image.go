@@ -2,7 +2,6 @@ package notion
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -19,35 +18,54 @@ func NewImageRepo(client *Client) *ImageRepo {
 }
 
 // Upload appends an image block to the trade's Notion page.
-// If data is provided, it creates a base64 data URI (Notion supports this for external images).
-// If data is nil, filename is treated as an external URL (legacy behavior, logs security warning).
+// If data is provided, it uploads the file via the Notion File Upload API and attaches it as a file_upload image block.
+// If data is nil, filename is treated as an external URL.
 func (r *ImageRepo) Upload(ctx context.Context, pageID string, filename string, data []byte) (string, error) {
-	var imageURL string
+	var imageBlock map[string]interface{}
+	var resultRef string
 
 	if len(data) > 0 {
-		// Convert file data to base64 data URI - no external URL needed, token stays safe
-		contentType := "image/jpeg" // default
-		if strings.HasSuffix(strings.ToLower(filename), ".png") {
+		contentType := "image/jpeg"
+		lower := strings.ToLower(filename)
+		switch {
+		case strings.HasSuffix(lower, ".png"):
 			contentType = "image/png"
+		case strings.HasSuffix(lower, ".webp"):
+			contentType = "image/webp"
+		case strings.HasSuffix(lower, ".gif"):
+			contentType = "image/gif"
 		}
-		b64Data := base64.StdEncoding.EncodeToString(data)
-		imageURL = fmt.Sprintf("data:%s;base64,%s", contentType, b64Data)
+
+		uploadID, err := r.client.CreateFileUpload(ctx, filename, contentType)
+		if err != nil {
+			return "", fmt.Errorf("create file upload: %w", err)
+		}
+		if err := r.client.SendFileUpload(ctx, uploadID, filename, contentType, data); err != nil {
+			return "", fmt.Errorf("send file upload: %w", err)
+		}
+
+		imageBlock = map[string]interface{}{
+			"type": "file_upload",
+			"file_upload": map[string]interface{}{
+				"id": uploadID,
+			},
+		}
+		resultRef = uploadID
 	} else {
-		// Legacy behavior: filename is an external URL
-		// This path should not be used for Telegram files as it exposes bot tokens
-		imageURL = filename
+		imageBlock = map[string]interface{}{
+			"type": "external",
+			"external": map[string]interface{}{
+				"url": filename,
+			},
+		}
+		resultRef = filename
 	}
 
 	children := []map[string]interface{}{
 		{
 			"object": "block",
 			"type":   "image",
-			"image": map[string]interface{}{
-				"type": "external",
-				"external": map[string]interface{}{
-					"url": imageURL,
-				},
-			},
+			"image":  imageBlock,
 		},
 	}
 
@@ -55,7 +73,7 @@ func (r *ImageRepo) Upload(ctx context.Context, pageID string, filename string, 
 	if err != nil {
 		return "", fmt.Errorf("append image block: %w", err)
 	}
-	return imageURL, nil
+	return resultRef, nil
 }
 
 // parseDate parses a Notion date string.

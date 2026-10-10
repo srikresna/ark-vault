@@ -14,7 +14,8 @@ const (
 	XPChallenge2nd      = 30
 	XPChallenge3rd      = 20
 	XPGoalAchieved      = 75
-	XPScreenshot        = 3
+	XPScreenshot         = 3
+	MaxDailyTradeXPCount = 3
 )
 
 // LevelThreshold defines a level and its XP requirement.
@@ -27,15 +28,15 @@ type LevelThreshold struct {
 // LevelTable is the ordered list of level thresholds.
 var LevelTable = []LevelThreshold{
 	{1, 0, "Retail"},
-	{2, 50, "Chartist"},
-	{3, 150, "Analyst"},
-	{4, 350, "Strategist"},
-	{5, 600, "Systematic"},
-	{6, 1000, "Algorithmic"},
-	{7, 1500, "Quantitative"},
-	{8, 2200, "Portfolio Manager"},
-	{9, 3000, "Fund Manager"},
-	{10, 4000, "Market Maker"},
+	{2, 300, "Chartist"},
+	{3, 1000, "Analyst"},
+	{4, 2500, "Strategist"},
+	{5, 5000, "Systematic"},
+	{6, 9000, "Algorithmic"},
+	{7, 15000, "Quantitative"},
+	{8, 23000, "Portfolio Manager"},
+	{9, 35000, "Fund Manager"},
+	{10, 50000, "Market Maker"},
 }
 
 // LevelForXP returns the level and title for the given XP amount.

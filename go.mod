@@ -1,11 +1,8 @@
 module github.com/arkcode369/ark-vault
 
-go 1.22
+go 1.23.0
 
-require (
-	github.com/dgraph-io/badger/v4 v4.9.1
-	github.com/jung-kurt/gofpdf v1.16.2
-)
+require github.com/dgraph-io/badger/v4 v4.9.1
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

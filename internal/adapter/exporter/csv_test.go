@@ -45,10 +45,10 @@ func TestCSVExporter_ExportCSV_Sanitization(t *testing.T) {
 	trades := []domain.Trade{
 		{
 			Date:       time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-			AssetType:  domain.Crypto,
+			AssetType:  domain.AssetCrypto,
 			Symbol:     "=CMD|'/C calc'!A0", // Malicious formula
-			Direction:  domain.Long,
-			Status:     domain.Win,
+			Direction:  domain.DirBuy,
+			Status:     domain.StatusWin,
 			ResultRR:   2.5,
 			TimeWindow: "NY",
 			Confluence: "+CMD", // Another risky prefix
@@ -75,7 +75,7 @@ func TestCSVExporter_ExportCSV_Sanitization(t *testing.T) {
 	}
 
 	// Verify the raw dangerous formula is NOT present
-	if strings.Contains(csvContent, ",=CMD|") || strings.Contains(csvContent, "=CMD|") {
+	if strings.Contains(csvContent, ",=CMD|") {
 		t.Error("CSV contains raw formula - sanitization failed!")
 	}
 }

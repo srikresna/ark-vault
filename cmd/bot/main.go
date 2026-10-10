@@ -121,11 +121,14 @@ func main() {
 	)
 	bot := telegram.NewBot(cfg.TelegramToken, handler, logger)
 	handler.SetBot(bot)
-
+	handler.SetResetter(store)
 	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if err := sender.RegisterCommandScopes(ctx, cfg.OwnerID); err != nil {
+		logger.Warn("failed to register telegram command scopes", "error", err)
+	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -215,6 +218,11 @@ func main() {
 				return err
 			}
 			for _, pref := range dueReminders {
+				if pref.IsCommunity || pref.ChatID < 0 {
+					text := telegram.FormatCommunityReminder()
+					sender.SendHTML(ctx, pref.ChatID, text, pref.ThreadID)
+					continue
+				}
 				streak, _ := gamSvc.GetStreak(ctx, pref.TelegramID)
 				streakDays := 0
 				if streak != nil {

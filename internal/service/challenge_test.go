@@ -9,13 +9,16 @@ import (
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
 
-// mockChallengeStore is a test double for ChallengeStore
 type mockChallengeStore struct {
 	challenges map[string]*domain.WeeklyChallenge
+	entries    map[string]map[int64]*domain.ChallengeEntry
 }
 
 func newMockChallengeStore() *mockChallengeStore {
-	return &mockChallengeStore{challenges: make(map[string]*domain.WeeklyChallenge)}
+	return &mockChallengeStore{
+		challenges: make(map[string]*domain.WeeklyChallenge),
+		entries:    make(map[string]map[int64]*domain.ChallengeEntry),
+	}
 }
 
 func (m *mockChallengeStore) GetChallenge(ctx context.Context, yearWeek string) (*domain.WeeklyChallenge, error) {
@@ -30,252 +33,125 @@ func (m *mockChallengeStore) SaveChallenge(ctx context.Context, c *domain.Weekly
 	return nil
 }
 
-// mockTradeRepo for challenge testing
-type mockChallengeTradeRepo struct {
-	trades map[int64][]domain.Trade
-}
-
-func newMockChallengeTradeRepo() *mockChallengeTradeRepo {
-	return &mockChallengeTradeRepo{trades: make(map[int64][]domain.Trade)}
-}
-
-func (m *mockChallengeTradeRepo) GetTrades(ctx context.Context, memberID int64) ([]domain.Trade, error) {
-	return m.trades[memberID], nil
-}
-
-func (m *mockChallengeTradeRepo) SaveTrade(ctx context.Context, memberID int64, trade domain.Trade) error {
-	m.trades[memberID] = append(m.trades[memberID], trade)
-	return nil
-}
-
-// mockMemberRepo for challenge testing
-type mockChallengeMemberRepo struct {
-	members map[int64]*domain.Member
-}
-
-func newMockChallengeMemberRepo() *mockChallengeMemberRepo {
-	return &mockChallengeMemberRepo{members: make(map[int64]*domain.Member)}
-}
-
-func (m *mockChallengeMemberRepo) GetMember(ctx context.Context, tgID int64) (*domain.Member, error) {
-	if member, ok := m.members[tgID]; ok {
-		return member, nil
+func (m *mockChallengeStore) GetChallengeEntry(ctx context.Context, yearWeek string, telegramID int64) (*domain.ChallengeEntry, error) {
+	if byUser, ok := m.entries[yearWeek]; ok {
+		return byUser[telegramID], nil
 	}
 	return nil, nil
 }
 
-func (m *mockChallengeMemberRepo) SaveMember(ctx context.Context, member *domain.Member) error {
-	m.members[member.TelegramID] = member
+func (m *mockChallengeStore) SaveChallengeEntry(ctx context.Context, entry *domain.ChallengeEntry) error {
+	if m.entries[entry.YearWeek] == nil {
+		m.entries[entry.YearWeek] = make(map[int64]*domain.ChallengeEntry)
+	}
+	m.entries[entry.YearWeek][entry.TelegramID] = entry
 	return nil
 }
 
-func (m *mockChallengeMemberRepo) GetOrCreateMember(ctx context.Context, tgID int64, username string) (*domain.Member, error) {
-	if member, ok := m.members[tgID]; ok {
-		return member, nil
+func (m *mockChallengeStore) GetChallengeEntries(ctx context.Context, yearWeek string) ([]domain.ChallengeEntry, error) {
+	var out []domain.ChallengeEntry
+	for _, e := range m.entries[yearWeek] {
+		out = append(out, *e)
 	}
-	member := &domain.Member{TelegramID: tgID, Username: username}
-	m.members[tgID] = member
-	return member, nil
+	return out, nil
 }
 
-// Mock badge service for challenge testing
-type mockChallengeBadgeService struct{}
-
-func (m *mockChallengeBadgeService) GetMemberStats(ctx context.Context, memberID int64) (*domain.BadgeStats, error) {
-	return &domain.BadgeStats{}, nil
+type mockBadgeStore struct {
+	badges map[int64]map[domain.BadgeID]domain.BadgeAward
 }
 
-func TestChallengeService_GetOrCreateChallenge_NewChallenge(t *testing.T) {
+func newMockBadgeStore() *mockBadgeStore {
+	return &mockBadgeStore{badges: make(map[int64]map[domain.BadgeID]domain.BadgeAward)}
+}
+
+func (m *mockBadgeStore) GetBadges(ctx context.Context, telegramID int64) ([]domain.BadgeAward, error) {
+	var out []domain.BadgeAward
+	for _, b := range m.badges[telegramID] {
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+func (m *mockBadgeStore) HasBadge(ctx context.Context, telegramID int64, badgeID domain.BadgeID) (bool, error) {
+	if byID, ok := m.badges[telegramID]; ok {
+		_, exists := byID[badgeID]
+		return exists, nil
+	}
+	return false, nil
+}
+
+func (m *mockBadgeStore) AwardBadge(ctx context.Context, award *domain.BadgeAward) error {
+	if m.badges[award.TelegramID] == nil {
+		m.badges[award.TelegramID] = make(map[domain.BadgeID]domain.BadgeAward)
+	}
+	m.badges[award.TelegramID][award.BadgeID] = *award
+	return nil
+}
+
+func TestChallengeService_GetOrCreateChallenge_NewAndExisting(t *testing.T) {
 	store := newMockChallengeStore()
-	tradesRepo := newMockChallengeTradeRepo()
-	membersRepo := newMockChallengeMemberRepo()
-
-	// Create minimal gamification and badge services
+	tradesRepo := newMockGamificationTradeRepo()
+	membersRepo := newMockGamificationMemberRepo()
 	gamStore := newMockGamificationStore()
 	gamSvc := NewGamificationService(gamStore, tradesRepo, membersRepo)
-	badgeSvc := NewBadgeService(nil, tradesRepo, membersRepo)
+	badgeSvc := NewBadgeService(newMockBadgeStore(), tradesRepo, gamSvc)
 
 	svc := NewChallengeService(store, tradesRepo, membersRepo, gamSvc, badgeSvc)
 
 	ctx := context.Background()
-	now := time.Now()
+	now := time.Now().In(wib)
 
 	challenge, err := svc.GetOrCreateChallenge(ctx, now)
 	if err != nil {
 		t.Fatalf("GetOrCreateChallenge failed: %v", err)
 	}
-
 	if challenge == nil {
 		t.Fatal("Expected challenge to be created, got nil")
 	}
-
-	// Verify yearWeek is set correctly
 	expectedYearWeek := domain.YearWeekString(now)
 	if challenge.YearWeek != expectedYearWeek {
 		t.Errorf("Expected YearWeek = %s, got %s", expectedYearWeek, challenge.YearWeek)
 	}
 
-	// Verify challenge is saved
-	if len(store.challenges) != 1 {
-		t.Errorf("Expected 1 challenge in store, got %d", len(store.challenges))
+	// Second call should return existing challenge
+	again, err := svc.GetOrCreateChallenge(ctx, now)
+	if err != nil {
+		t.Fatalf("second GetOrCreateChallenge failed: %v", err)
+	}
+	if again.Title != challenge.Title {
+		t.Errorf("Expected existing challenge title %q, got %q", challenge.Title, again.Title)
 	}
 }
 
-func TestChallengeService_GetOrCreateChallenge_ExistingChallenge(t *testing.T) {
+func TestChallengeService_Standings_NegativeOnlyBestRR(t *testing.T) {
 	store := newMockChallengeStore()
-	tradesRepo := newMockChallengeTradeRepo()
-	membersRepo := newMockChallengeMemberRepo()
-
+	tradesRepo := newMockGamificationTradeRepo()
+	membersRepo := newMockGamificationMemberRepo()
 	gamStore := newMockGamificationStore()
 	gamSvc := NewGamificationService(gamStore, tradesRepo, membersRepo)
-	badgeSvc := NewBadgeService(nil, tradesRepo, membersRepo)
+	badgeSvc := NewBadgeService(newMockBadgeStore(), tradesRepo, gamSvc)
 
 	svc := NewChallengeService(store, tradesRepo, membersRepo, gamSvc, badgeSvc)
-
 	ctx := context.Background()
-	now := time.Now()
+	now := time.Now().In(wib)
 
-	// Pre-populate a challenge
-	existingChallenge := &domain.WeeklyChallenge{
-		YearWeek: domain.YearWeekString(now),
-		Status:   domain.ChallengeActive,
+	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 1, Username: "alice"})
+	tradesRepo.trades[1] = []domain.Trade{
+		{Date: now, Status: domain.StatusLoss, ResultRR: -2.0},
+		{Date: now, Status: domain.StatusLoss, ResultRR: -0.5},
 	}
-	store.challenges[existingChallenge.YearWeek] = existingChallenge
 
-	challenge, err := svc.GetOrCreateChallenge(ctx, now)
+	ch := &domain.WeeklyChallenge{
+		YearWeek:  domain.YearWeekString(now),
+		Type:      domain.ChallengeBestRR,
+		StartDate: now.Add(-1 * time.Hour),
+		EndDate:   now.Add(1 * time.Hour),
+	}
+	standings, err := svc.GetCurrentStandings(ctx, ch)
 	if err != nil {
-		t.Fatalf("GetOrCreateChallenge failed: %v", err)
+		t.Fatalf("GetCurrentStandings failed: %v", err)
 	}
-
-	if challenge == nil {
-		t.Fatal("Expected challenge to be returned, got nil")
-	}
-
-	// Should return existing, not create new
-	if challenge.Status != domain.ChallengeActive {
-		t.Errorf("Expected status = Active, got %v", challenge.Status)
-	}
-}
-
-func TestChallengeService_GetCurrentWeek(t *testing.T) {
-	store := newMockChallengeStore()
-	tradesRepo := newMockChallengeTradeRepo()
-	membersRepo := newMockChallengeMemberRepo()
-
-	gamStore := newMockGamificationStore()
-	gamSvc := NewGamificationService(gamStore, tradesRepo, membersRepo)
-	badgeSvc := NewBadgeService(nil, tradesRepo, membersRepo)
-
-	svc := NewChallengeService(store, tradesRepo, membersRepo, gamSvc, badgeSvc)
-
-	ctx := context.Background()
-
-	challenge, err := svc.GetCurrentWeek(ctx)
-	if err != nil {
-		t.Fatalf("GetCurrentWeek failed: %v", err)
-	}
-
-	if challenge == nil {
-		t.Fatal("Expected challenge to be created, got nil")
-	}
-
-	// Should be for current week
-	expectedYearWeek := domain.YearWeekString(time.Now())
-	if challenge.YearWeek != expectedYearWeek {
-		t.Errorf("Expected YearWeek = %s, got %s", expectedYearWeek, challenge.YearWeek)
-	}
-}
-
-func TestChallengeService_GetChallengeStats(t *testing.T) {
-	store := newMockChallengeStore()
-	tradesRepo := newMockChallengeTradeRepo()
-	membersRepo := newMockChallengeMemberRepo()
-
-	gamStore := newMockGamificationStore()
-	gamSvc := NewGamificationService(gamStore, tradesRepo, membersRepo)
-	badgeSvc := NewBadgeService(nil, tradesRepo, membersRepo)
-
-	svc := NewChallengeService(store, tradesRepo, membersRepo, gamSvc, badgeSvc)
-
-	ctx := context.Background()
-	now := time.Now()
-
-	// Create a challenge with some participants
-	challenge := &domain.WeeklyChallenge{
-		YearWeek:     domain.YearWeekString(now),
-		Status:       domain.ChallengeActive,
-		Participants: []int64{1, 2, 3},
-	}
-	store.challenges[challenge.YearWeek] = challenge
-
-	stats, err := svc.GetChallengeStats(ctx, now)
-	if err != nil {
-		t.Fatalf("GetChallengeStats failed: %v", err)
-	}
-
-	if stats == nil {
-		t.Fatal("Expected stats, got nil")
-	}
-
-	if stats.ParticipantCount != 3 {
-		t.Errorf("Expected 3 participants, got %d", stats.ParticipantCount)
-	}
-}
-
-func TestChallengeBestRR_NegativeOnlyPortfolio(t *testing.T) {
-	// Test ChallengeBestRR with negative-only trades
-	trades := []domain.Trade{
-		{Status: domain.Loss, ResultRR: -1.0},
-		{Status: domain.Loss, ResultRR: -2.5},
-		{Status: domain.Loss, ResultRR: -0.5},
-	}
-
-	best := ChallengeBestRR(trades)
-
-	// With negative-only portfolio, best should be the least negative (closest to 0)
-	expected := -0.5
-	if best != expected {
-		t.Errorf("ChallengeBestRR with negative trades = %.2f, want %.2f", best, expected)
-	}
-}
-
-func TestChallengeBestRR_MixedPortfolio(t *testing.T) {
-	trades := []domain.Trade{
-		{Status: domain.Loss, ResultRR: -1.0},
-		{Status: domain.Win, ResultRR: 2.5},
-		{Status: domain.Loss, ResultRR: -0.5},
-		{Status: domain.Win, ResultRR: 1.5},
-	}
-
-	best := ChallengeBestRR(trades)
-
-	expected := 2.5
-	if best != expected {
-		t.Errorf("ChallengeBestRR with mixed trades = %.2f, want %.2f", best, expected)
-	}
-}
-
-func TestChallengeBestRR_EmptyTrades(t *testing.T) {
-	trades := []domain.Trade{}
-
-	best := ChallengeBestRR(trades)
-
-	// Empty trades should return negative infinity
-	if best != math.Inf(-1) {
-		t.Errorf("ChallengeBestRR with empty trades = %.2f, want -Inf", best)
-	}
-}
-
-func TestChallengeBestRR_NoClosedTrades(t *testing.T) {
-	trades := []domain.Trade{
-		{Status: domain.Open, ResultRR: 0},
-		{Status: domain.Pending, ResultRR: 0},
-	}
-
-	best := ChallengeBestRR(trades)
-
-	// No closed trades should return negative infinity
-	if best != math.Inf(-1) {
-		t.Errorf("ChallengeBestRR with no closed trades = %.2f, want -Inf", best)
+	if len(standings) != 1 || math.Abs(standings[0].Value-(-0.5)) > 1e-9 {
+		t.Fatalf("Expected best RR -0.5 for negative-only trades, got %+v", standings)
 	}
 }
