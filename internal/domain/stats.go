@@ -1,24 +1,45 @@
 package domain
 
+import (
+	"math"
+	"sort"
+	"strings"
+	"time"
+)
+
 // Stats holds computed statistics for a single member.
 type Stats struct {
-	TotalTrades int
-	Wins        int
-	Losses      int
-	BreakEvens  int
-	OpenTrades  int
-	WinRate     float64 // percentage 0-100
-	TotalRR     float64
-	AvgRR       float64
-	BestRR      float64
-	WorstRR     float64
-	CurStreak   int // positive = win streak, negative = loss streak
-	MaxWinStrk  int
-	ByAsset     map[AssetType]AssetStats
+	TotalTrades  int
+	Wins         int
+	Losses       int
+	BreakEvens   int
+	OpenTrades   int
+	WinRate      float64 // percentage 0-100
+	TotalRR      float64
+	AvgRR        float64
+	Expectancy   float64 // average R per closed trade (Wins+Losses+BE)
+	ProfitFactor float64 // gross win RR / |gross loss RR|
+	BestRR       float64
+	WorstRR      float64
+	CurStreak    int // positive = win streak, negative = loss streak
+	MaxWinStrk   int
+	ByAsset      map[AssetType]AssetStats
+	BySession    map[TimeWindow]AssetStats
+	TopSymbols   []SymbolStats
 }
 
-// AssetStats is a per-asset-type breakdown.
+// AssetStats is a per-asset-type or per-session breakdown.
 type AssetStats struct {
+	Total   int
+	Wins    int
+	Losses  int
+	TotalRR float64
+	WinRate float64
+}
+
+// SymbolStats is a per-symbol breakdown.
+type SymbolStats struct {
+	Symbol  string
 	Total   int
 	Wins    int
 	Losses  int
@@ -28,9 +49,12 @@ type AssetStats struct {
 
 // CalculateStats computes statistics from a slice of trades.
 func CalculateStats(trades []Trade) Stats {
-	s := Stats{ByAsset: make(map[AssetType]AssetStats)}
-
-	var rrSum float64
+	s := Stats{
+		ByAsset:   make(map[AssetType]AssetStats),
+		BySession: make(map[TimeWindow]AssetStats),
+	}
+	symbolMap := make(map[string]*SymbolStats)
+	var rrSum, grossWin, grossLoss float64
 	var rrCount int
 	var curStreak, maxWin int
 
@@ -48,6 +72,7 @@ func CalculateStats(trades []Trade) Stats {
 			as.Wins++
 			as.TotalRR += t.ResultRR
 			s.TotalRR += t.ResultRR
+			grossWin += t.ResultRR
 			if curStreak > 0 {
 				curStreak++
 			} else {
@@ -61,6 +86,7 @@ func CalculateStats(trades []Trade) Stats {
 			as.Losses++
 			as.TotalRR += t.ResultRR // negative value
 			s.TotalRR += t.ResultRR
+			grossLoss += math.Abs(t.ResultRR)
 			if curStreak < 0 {
 				curStreak--
 			} else {
@@ -96,6 +122,45 @@ func CalculateStats(trades []Trade) Stats {
 			as.WinRate = float64(as.Wins) / float64(closed) * 100
 		}
 		s.ByAsset[t.AssetType] = as
+
+		// Per-session accumulator
+		if t.TimeWindow != "" {
+			ss := s.BySession[t.TimeWindow]
+			ss.Total++
+			switch t.Status {
+			case StatusWin:
+				ss.Wins++
+				ss.TotalRR += t.ResultRR
+			case StatusLoss:
+				ss.Losses++
+				ss.TotalRR += t.ResultRR
+			}
+			if closed := ss.Wins + ss.Losses; closed > 0 {
+				ss.WinRate = float64(ss.Wins) / float64(closed) * 100
+			}
+			s.BySession[t.TimeWindow] = ss
+		}
+
+		// Per-symbol accumulator
+		if t.Symbol != "" {
+			sym, ok := symbolMap[t.Symbol]
+			if !ok {
+				sym = &SymbolStats{Symbol: t.Symbol}
+				symbolMap[t.Symbol] = sym
+			}
+			sym.Total++
+			switch t.Status {
+			case StatusWin:
+				sym.Wins++
+				sym.TotalRR += t.ResultRR
+			case StatusLoss:
+				sym.Losses++
+				sym.TotalRR += t.ResultRR
+			}
+			if closed := sym.Wins + sym.Losses; closed > 0 {
+				sym.WinRate = float64(sym.Wins) / float64(closed) * 100
+			}
+		}
 	}
 
 	closed := s.Wins + s.Losses
@@ -105,8 +170,86 @@ func CalculateStats(trades []Trade) Stats {
 	if rrCount > 0 {
 		s.AvgRR = rrSum / float64(rrCount)
 	}
+	totalClosedWithBE := s.Wins + s.Losses + s.BreakEvens
+	if totalClosedWithBE > 0 {
+		s.Expectancy = s.TotalRR / float64(totalClosedWithBE)
+	}
+	if grossLoss > 0 {
+		s.ProfitFactor = grossWin / grossLoss
+	}
+
+	for _, sym := range symbolMap {
+		s.TopSymbols = append(s.TopSymbols, *sym)
+	}
+	sort.Slice(s.TopSymbols, func(i, j int) bool {
+		if s.TopSymbols[i].Total != s.TopSymbols[j].Total {
+			return s.TopSymbols[i].Total > s.TopSymbols[j].Total
+		}
+		return s.TopSymbols[i].TotalRR > s.TopSymbols[j].TotalRR
+	})
+	if len(s.TopSymbols) > 3 {
+		s.TopSymbols = s.TopSymbols[:3]
+	}
+
 	s.CurStreak = curStreak
 	s.MaxWinStrk = maxWin
 
 	return s
+}
+
+// FilterTradesByPeriod filters trades by "week", "month", or "all" relative to now.
+func FilterTradesByPeriod(trades []Trade, period string, now time.Time) []Trade {
+	switch strings.ToLower(strings.TrimSpace(period)) {
+	case "week", "weekly":
+		weekday := int(now.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		monday := now.AddDate(0, 0, -(weekday - 1))
+		start := time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, now.Location())
+		var out []Trade
+		for _, t := range trades {
+			if !t.Date.Before(start) {
+				out = append(out, t)
+			}
+		}
+		return out
+	case "month", "monthly":
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		var out []Trade
+		for _, t := range trades {
+			if !t.Date.Before(start) {
+				out = append(out, t)
+			}
+		}
+		return out
+	default:
+		return trades
+	}
+}
+
+// ConsecutiveLossesToday counts consecutive LOSS trades recorded on the same day as now (from most recent).
+func ConsecutiveLossesToday(trades []Trade, now time.Time) int {
+	dayStr := now.Format("2006-01-02")
+	loc := now.Location()
+
+	var todayTrades []Trade
+	for _, t := range trades {
+		if t.Date.In(loc).Format("2006-01-02") == dayStr {
+			todayTrades = append(todayTrades, t)
+		}
+	}
+	sort.Slice(todayTrades, func(i, j int) bool {
+		return todayTrades[i].Date.After(todayTrades[j].Date)
+	})
+
+	losses := 0
+	for _, t := range todayTrades {
+		if t.Status == StatusLoss {
+			losses++
+		} else if t.Status == StatusWin || t.Status == StatusBE {
+			break
+		}
+	}
+	return losses
 }

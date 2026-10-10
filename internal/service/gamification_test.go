@@ -77,9 +77,29 @@ func newMockGamificationTradeRepo() *mockGamificationTradeRepo {
 func (m *mockGamificationTradeRepo) GetTrades(ctx context.Context, memberID int64) ([]domain.Trade, error) {
 	return m.trades[memberID], nil
 }
-
 func (m *mockGamificationTradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain.Trade) error {
 	m.trades[memberID] = append(m.trades[memberID], *trade)
+	return nil
+}
+
+func (m *mockGamificationTradeRepo) UpdateTrade(ctx context.Context, memberID int64, trade *domain.Trade) error {
+	for i := range m.trades[memberID] {
+		if m.trades[memberID][i].ID == trade.ID {
+			m.trades[memberID][i] = *trade
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *mockGamificationTradeRepo) DeleteTrade(ctx context.Context, memberID int64, tradeID string) error {
+	var kept []domain.Trade
+	for _, t := range m.trades[memberID] {
+		if t.ID != tradeID {
+			kept = append(kept, t)
+		}
+	}
+	m.trades[memberID] = kept
 	return nil
 }
 
@@ -180,5 +200,44 @@ func TestGamificationService_DailyTradeXPCap(t *testing.T) {
 	}
 	if res4.TotalXP != xpAfter3 {
 		t.Errorf("TotalXP after capped 4th trade = %d, want %d", res4.TotalXP, xpAfter3)
+	}
+}
+
+func TestGamificationService_AdjustXPForTradeChange(t *testing.T) {
+	store := newMockGamificationStore()
+	tradesRepo := newMockGamificationTradeRepo()
+	membersRepo := newMockGamificationMemberRepo()
+	svc := NewGamificationService(store, tradesRepo, membersRepo)
+
+	ctx := context.Background()
+	memberID := int64(777)
+
+	openTrade := &domain.Trade{ID: "t1", Symbol: "XAUUSD", Status: domain.StatusOpen}
+	res, err := svc.OnTradeRecorded(ctx, memberID, openTrade)
+	if err != nil {
+		t.Fatalf("OnTradeRecorded failed: %v", err)
+	}
+	// Open trade gives 10 XP (trade) + 5 XP (streak) = 15 XP
+	if res.TotalXP != 15 {
+		t.Fatalf("expected 15 XP after open trade, got %d", res.TotalXP)
+	}
+
+	// Close trade as WIN +2.5R -> delta is +10 XP (XPWinHighRR)
+	closedWin := &domain.Trade{ID: "t1", Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 2.5}
+	prof, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, openTrade, closedWin)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange close win failed: %v", err)
+	}
+	if delta != 10 || prof.TotalXP != 25 {
+		t.Errorf("expected delta=+10 and TotalXP=25 after closing WIN 2.5R, got delta=%d TotalXP=%d", delta, prof.TotalXP)
+	}
+
+	// Delete the trade (newTrade == nil) -> delta is -20 XP (10 base + 10 win high RR)
+	prof, delta, err = svc.AdjustXPForTradeChange(ctx, memberID, closedWin, nil)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange delete failed: %v", err)
+	}
+	if delta != -20 || prof.TotalXP != 5 {
+		t.Errorf("expected delta=-20 and TotalXP=5 after deleting trade, got delta=%d TotalXP=%d", delta, prof.TotalXP)
 	}
 }

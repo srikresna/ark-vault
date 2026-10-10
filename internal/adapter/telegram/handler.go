@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-
 	"github.com/arkcode369/ark-vault/internal/domain"
 	"github.com/arkcode369/ark-vault/internal/service"
 	"github.com/arkcode369/ark-vault/pkg/timeutil"
@@ -42,6 +42,25 @@ type Resetter interface {
 type NotionResetter interface {
 	ResetAll(ctx context.Context) (int, error)
 }
+// TradeEditField identifies which trade attribute is awaiting free-text input.
+type TradeEditField string
+
+const (
+	EditFieldSymbol     TradeEditField = "symbol"
+	EditFieldResultRR   TradeEditField = "result_rr"
+	EditFieldConfluence TradeEditField = "confluence"
+)
+
+// TradeEditSession holds pending state when a user is editing or closing an existing trade.
+type TradeEditSession struct {
+	TradeID   string
+	OldTrade  domain.Trade
+	NewTrade  domain.Trade
+	Field     TradeEditField
+	ChatID    int64
+	ThreadID  int
+	ExpiresAt time.Time
+}
 
 // Handler routes incoming Telegram updates to the appropriate logic.
 type Handler struct {
@@ -53,6 +72,8 @@ type Handler struct {
 	members          service.MemberRepository
 	resetter         Resetter
 	guided           *GuidedFlow
+	editMu           sync.RWMutex
+	editSessions     map[int64]*TradeEditSession
 	limiter          *RateLimiter
 	logger           *slog.Logger
 	communityGroupID int64
@@ -79,6 +100,7 @@ func NewHandler(
 		trades:           trades,
 		members:          members,
 		guided:           NewGuidedFlow(),
+		editSessions:     make(map[int64]*TradeEditSession),
 		limiter:          limiter,
 		logger:           logger,
 		communityGroupID: communityGroupID,
@@ -166,6 +188,10 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 
 	// Check if user is in a guided session and this is a free-text input step
 	if msg.From != nil {
+		if editSess := h.getEditSession(msg.From.ID); editSess != nil && !strings.HasPrefix(text, "/") {
+			h.handleTradeEditInput(ctx, msg, editSess)
+			return
+		}
 		if session := h.guided.Get(msg.From.ID); session != nil {
 			h.handleGuidedInput(ctx, msg, session)
 			return
@@ -176,6 +202,12 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 	switch {
 	case strings.HasPrefix(text, "/journal"):
 		h.cmdJournal(ctx, msg)
+	case strings.HasPrefix(text, "/open"):
+		h.cmdOpen(ctx, msg)
+	case strings.HasPrefix(text, "/history"):
+		h.cmdHistory(ctx, msg)
+	case strings.HasPrefix(text, "/undo"):
+		h.cmdUndo(ctx, msg)
 	case strings.HasPrefix(text, "/stats"):
 		h.cmdStats(ctx, msg, text)
 	case strings.HasPrefix(text, "/leaderboard"):
@@ -235,10 +267,13 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 		h.uploadPhoto(ctx, msg.Photo, trade.ID)
 	}
 
+	revengeWarn := h.checkRevengeWarning(ctx, msg.From.ID, trade)
+
 	if h.svc.Gamification != nil {
 		gamResult, _ := h.svc.Gamification.OnTradeRecorded(ctx, msg.From.ID, trade)
 		if gamResult != nil {
-			_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak), msg.MessageThreadID)
+			confirmText := FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak) + revengeWarn
+			_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, confirmText, msg.MessageThreadID)
 			// Check for new badges
 			if h.svc.Badge != nil {
 				streak, _ := h.svc.Gamification.GetStreak(ctx, msg.From.ID)
@@ -258,7 +293,7 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 		}
 	}
 	// fallback to original confirmation
-	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatTradeConfirmation(trade), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatTradeConfirmation(trade)+revengeWarn, msg.MessageThreadID)
 }
 
 // cmdJournal starts the guided flow.
@@ -284,31 +319,37 @@ func (h *Handler) cmdStats(ctx context.Context, msg *Message, text string) {
 	}
 	targetID := msg.From.ID
 	targetUsername := msg.From.Username
+	period := "all"
 
-	// Check if querying another user: /stats @username
+	// Supports: /stats, /stats week, /stats month, /stats @username, /stats @username week
 	parts := strings.Fields(text)
-	if len(parts) > 1 && strings.HasPrefix(parts[1], "@") {
-		lookupUsername := strings.TrimPrefix(parts[1], "@")
-		member, err := h.findMemberByUsername(ctx, lookupUsername)
-		if err != nil || member == nil {
-			_, _ = h.sender.SendText(ctx, msg.Chat.ID, fmt.Sprintf("📭 Member @%s belum pernah mencatat trade.", lookupUsername), msg.MessageThreadID)
-			return
+	for _, p := range parts[1:] {
+		if strings.HasPrefix(p, "@") {
+			lookupUsername := strings.TrimPrefix(p, "@")
+			member, err := h.findMemberByUsername(ctx, lookupUsername)
+			if err != nil || member == nil {
+				_, _ = h.sender.SendText(ctx, msg.Chat.ID, fmt.Sprintf("📭 Member @%s belum pernah mencatat trade.", lookupUsername), msg.MessageThreadID)
+				return
+			}
+			targetID = member.TelegramID
+			targetUsername = member.Username
+		} else {
+			switch strings.ToLower(p) {
+			case "week", "weekly":
+				period = "week"
+			case "month", "monthly":
+				period = "month"
+			}
 		}
-		targetID = member.TelegramID
-		targetUsername = member.Username
 	}
 
-	stats, err := h.svc.Journal.GetMemberStats(ctx, targetID)
-	if err != nil {
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat.", msg.MessageThreadID)
-		return
-	}
-	if stats == nil {
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat.", msg.MessageThreadID)
+	stats, err := h.svc.Journal.GetMemberStatsByPeriod(ctx, targetID, period)
+	if err != nil || stats == nil {
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat untuk periode ini.", msg.MessageThreadID)
 		return
 	}
 
-	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatStats(targetUsername, stats), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatStatsWithPeriod(targetUsername, period, stats), msg.MessageThreadID)
 }
 
 // findMemberByUsername searches cached members by username.
@@ -328,17 +369,29 @@ func (h *Handler) findMemberByUsername(ctx context.Context, username string) (*d
 // cmdLeaderboard shows the leaderboard.
 func (h *Handler) cmdLeaderboard(ctx context.Context, msg *Message, text string) {
 	metric := "winrate"
-	if strings.Contains(strings.ToLower(text), "rr") {
-		metric = "rr"
+	period := "all"
+	minTrades := 5
+
+	for _, p := range strings.Fields(strings.ToLower(text))[1:] {
+		switch p {
+		case "rr":
+			metric = "rr"
+		case "week", "weekly":
+			period = "week"
+			minTrades = 2
+		case "month", "monthly":
+			period = "month"
+			minTrades = 3
+		}
 	}
 
-	entries, err := h.svc.Leaderboard.GetLeaderboard(ctx, metric, 10, 5)
+	entries, err := h.svc.Leaderboard.GetLeaderboardByPeriod(ctx, metric, period, 10, minTrades)
 	if err != nil {
 		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Error: "+err.Error(), msg.MessageThreadID)
 		return
 	}
 
-	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatLeaderboard(entries, metric), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatLeaderboardWithPeriod(entries, metric, period), msg.MessageThreadID)
 }
 
 // cmdExport exports the member's trades as CSV or PDF.
@@ -459,6 +512,11 @@ func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
 
 	// Community gate
 	if cb.Message != nil && !h.isAuthorized(ctx, cb.From.ID, cb.Message.Chat.ID, cb.Message.MessageThreadID, cb.Message.Chat.Type) {
+		return
+	}
+
+	// Handle /open and /history callbacks before guided flow
+	if h.handleTradeActionCallback(ctx, cb) {
 		return
 	}
 
@@ -639,6 +697,8 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 		h.uploadPhoto(ctx, []PhotoSize{{FileID: session.PhotoFileID}}, trade.ID)
 	}
 
+	revengeWarn := h.checkRevengeWarning(ctx, from.ID, trade)
+
 	// After successful trade recording, trigger gamification
 	if h.svc.Gamification != nil {
 		gamResult, err := h.svc.Gamification.OnTradeRecorded(ctx, from.ID, trade)
@@ -646,7 +706,8 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 			h.logger.Error("gamification failed", "error", err)
 		} else {
 			// Send enhanced confirmation with XP info
-			_, _ = h.sender.SendHTML(ctx, session.ChatID, FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak), session.ThreadID)
+			confirmText := FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak) + revengeWarn
+			_, _ = h.sender.SendHTML(ctx, session.ChatID, confirmText, session.ThreadID)
 			// Check for new badges
 			if h.svc.Badge != nil {
 				streak, _ := h.svc.Gamification.GetStreak(ctx, from.ID)
@@ -667,7 +728,7 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 		}
 	}
 
-	_, _ = h.sender.SendHTML(ctx, session.ChatID, FormatTradeConfirmation(trade), session.ThreadID)
+	_, _ = h.sender.SendHTML(ctx, session.ChatID, FormatTradeConfirmation(trade)+revengeWarn, session.ThreadID)
 	h.guided.Remove(from.ID)
 }
 
@@ -941,4 +1002,366 @@ func (h *Handler) executeReset(ctx context.Context, chatID int64, threadID int) 
 	}
 	msg := fmt.Sprintf("✅ <b>Reset selesai!</b>\n\n• BadgerDB: seluruh data gamifikasi &amp; cache dihapus\n• Notion: <b>%d</b> halaman jurnal diarsipkan", archivedCount)
 	_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
+}
+
+func (h *Handler) checkRevengeWarning(ctx context.Context, userID int64, trade *domain.Trade) string {
+	if trade == nil || trade.Status != domain.StatusLoss || h.trades == nil {
+		return ""
+	}
+	trades, err := h.trades.GetTrades(ctx, userID)
+	if err != nil {
+		return ""
+	}
+	wibLoc, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wibLoc = time.FixedZone("WIB", 7*3600)
+	}
+	losses := domain.ConsecutiveLossesToday(trades, time.Now().In(wibLoc))
+	return FormatRevengeWarning(losses)
+}
+
+func (h *Handler) setEditSession(userID int64, sess *TradeEditSession) {
+	h.editMu.Lock()
+	defer h.editMu.Unlock()
+	sess.ExpiresAt = time.Now().Add(15 * time.Minute)
+	h.editSessions[userID] = sess
+}
+
+func (h *Handler) getEditSession(userID int64) *TradeEditSession {
+	h.editMu.RLock()
+	defer h.editMu.RUnlock()
+	s, ok := h.editSessions[userID]
+	if !ok || time.Now().After(s.ExpiresAt) {
+		return nil
+	}
+	return s
+}
+
+func (h *Handler) removeEditSession(userID int64) {
+	h.editMu.Lock()
+	defer h.editMu.Unlock()
+	delete(h.editSessions, userID)
+}
+
+func (h *Handler) findUserTrade(ctx context.Context, userID int64, tradeID string) (*domain.Trade, error) {
+	if h.trades == nil {
+		return nil, fmt.Errorf("trade repository not configured")
+	}
+	trades, err := h.trades.GetTrades(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range trades {
+		if trades[i].ID == tradeID {
+			cp := trades[i]
+			return &cp, nil
+		}
+	}
+	return nil, fmt.Errorf("trade tidak ditemukan")
+}
+
+// cmdOpen lists all trades with OPEN status and provides buttons to close them.
+func (h *Handler) cmdOpen(ctx context.Context, msg *Message) {
+	if msg.From == nil || h.svc.Journal == nil {
+		return
+	}
+	openTrades, err := h.svc.Journal.GetOpenTrades(ctx, msg.From.ID)
+	if err != nil {
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat open trades.", msg.MessageThreadID)
+		return
+	}
+	text, rows := FormatOpenTrades(openTrades)
+	if len(rows) > 0 {
+		_, _ = h.sender.SendWithKeyboard(ctx, msg.Chat.ID, text, rows, msg.MessageThreadID)
+	} else {
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, text, msg.MessageThreadID)
+	}
+}
+
+// cmdHistory shows paginated trade history with Edit and Delete buttons.
+func (h *Handler) cmdHistory(ctx context.Context, msg *Message) {
+	if msg.From == nil || h.trades == nil {
+		return
+	}
+	trades, err := h.trades.GetTrades(ctx, msg.From.ID)
+	if err != nil || len(trades) == 0 {
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, "📭 Belum ada riwayat trade.", msg.MessageThreadID)
+		return
+	}
+	text, rows := FormatHistoryPage(trades, 0, 5)
+	if len(rows) > 0 {
+		_, _ = h.sender.SendWithKeyboard(ctx, msg.Chat.ID, text, rows, msg.MessageThreadID)
+	} else {
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, text, msg.MessageThreadID)
+	}
+}
+
+// cmdUndo deletes the user's most recent trade entry.
+func (h *Handler) cmdUndo(ctx context.Context, msg *Message) {
+	if msg.From == nil || h.trades == nil || h.svc.Journal == nil {
+		return
+	}
+	trades, err := h.trades.GetTrades(ctx, msg.From.ID)
+	if err != nil || len(trades) == 0 {
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-undo.", msg.MessageThreadID)
+		return
+	}
+	latest := trades[0]
+	h.deleteTradeAndNotify(ctx, msg.From.ID, &latest, msg.Chat.ID, msg.MessageThreadID)
+}
+
+func (h *Handler) deleteTradeAndNotify(ctx context.Context, userID int64, trade *domain.Trade, chatID int64, threadID int) {
+	if err := h.svc.Journal.DeleteTrade(ctx, userID, trade.ID); err != nil {
+		h.logger.Error("delete trade failed", "error", err)
+		_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal menghapus trade: "+err.Error(), threadID)
+		return
+	}
+	xpNote := ""
+	if h.svc.Gamification != nil {
+		if prof, delta, err := h.svc.Gamification.AdjustXPForTradeChange(ctx, userID, trade, nil); err == nil && delta != 0 {
+			xpNote = fmt.Sprintf("\n⚡ XP disesuaikan: <b>%+d XP</b> (Total: %d XP — Level %d %s)", delta, prof.TotalXP, prof.Level, prof.Title)
+		}
+	}
+	msg := fmt.Sprintf("🗑 Trade <b>%s %s</b> (%s) berhasil dihapus dari jurnal &amp; Notion.%s",
+		trade.Symbol, trade.Direction, trade.Status, xpNote)
+	_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
+}
+
+func (h *Handler) applyTradeUpdate(ctx context.Context, userID int64, oldTrade, newTrade *domain.Trade, chatID int64, threadID int) {
+	if err := h.svc.Journal.UpdateTrade(ctx, userID, newTrade); err != nil {
+		h.logger.Error("update trade failed", "error", err)
+		_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal mengupdate trade: "+err.Error(), threadID)
+		return
+	}
+	xpNote := ""
+	if h.svc.Gamification != nil {
+		if prof, delta, err := h.svc.Gamification.AdjustXPForTradeChange(ctx, userID, oldTrade, newTrade); err == nil && delta != 0 {
+			xpNote = fmt.Sprintf("\n⚡ XP disesuaikan: <b>%+d XP</b> (Total: %d XP — Level %d %s)", delta, prof.TotalXP, prof.Level, prof.Title)
+		}
+		if h.svc.Badge != nil {
+			streak, _ := h.svc.Gamification.GetStreak(ctx, userID)
+			newBadges, _ := h.svc.Badge.CheckAndAwardBadges(ctx, userID, newTrade, streak)
+			if len(newBadges) > 0 {
+				_, _ = h.sender.SendHTML(ctx, chatID, FormatBadgeUnlock(newBadges), threadID)
+			}
+		}
+		if h.svc.Goal != nil {
+			if achieved, _ := h.svc.Goal.CheckGoalCompletion(ctx, userID); achieved {
+				_, _ = h.sender.SendHTML(ctx, chatID, "🎯 <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", threadID)
+			}
+		}
+	}
+	revengeWarn := h.checkRevengeWarning(ctx, userID, newTrade)
+	msg := fmt.Sprintf("✅ <b>Trade berhasil diperbarui!</b>\n\nSymbol: <b>%s</b> (%s)\nDirection: <b>%s</b>\nStatus: <b>%s</b> (%+.1fR)%s%s",
+		newTrade.Symbol, newTrade.AssetType.String(), newTrade.Direction, newTrade.Status, newTrade.ResultRR, xpNote, revengeWarn)
+	_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
+}
+
+func (h *Handler) handleTradeActionCallback(ctx context.Context, cb *CallbackQuery) bool {
+	if cb.From == nil || cb.Message == nil {
+		return false
+	}
+	data := cb.Data
+	userID := cb.From.ID
+	chatID := cb.Message.Chat.ID
+	threadID := cb.Message.MessageThreadID
+
+	switch {
+	case strings.HasPrefix(data, "open:"):
+		parts := strings.SplitN(data, ":", 3)
+		if len(parts) != 3 {
+			return true
+		}
+		action, tradeID := parts[1], parts[2]
+		oldTrade, err := h.findUserTrade(ctx, userID, tradeID)
+		if err != nil {
+			_, _ = h.sender.SendText(ctx, chatID, "❌ Trade tidak ditemukan.", threadID)
+			return true
+		}
+		newTrade := *oldTrade
+		switch action {
+		case "be":
+			newTrade.Status = domain.StatusBE
+			newTrade.ResultRR = 0
+			h.applyTradeUpdate(ctx, userID, oldTrade, &newTrade, chatID, threadID)
+		case "open":
+			newTrade.Status = domain.StatusOpen
+			newTrade.ResultRR = 0
+			h.applyTradeUpdate(ctx, userID, oldTrade, &newTrade, chatID, threadID)
+		case "win":
+			newTrade.Status = domain.StatusWin
+			h.setEditSession(userID, &TradeEditSession{
+				TradeID:  tradeID,
+				OldTrade: *oldTrade,
+				NewTrade: newTrade,
+				Field:    EditFieldResultRR,
+				ChatID:   chatID,
+				ThreadID: threadID,
+			})
+			_, _ = h.sender.SendHTML(ctx, chatID, fmt.Sprintf("📊 Masukkan jumlah RR untuk <b>%s</b> (WIN) (contoh: 2, 1.5):", oldTrade.Symbol), threadID)
+		case "loss":
+			newTrade.Status = domain.StatusLoss
+			h.setEditSession(userID, &TradeEditSession{
+				TradeID:  tradeID,
+				OldTrade: *oldTrade,
+				NewTrade: newTrade,
+				Field:    EditFieldResultRR,
+				ChatID:   chatID,
+				ThreadID: threadID,
+			})
+			_, _ = h.sender.SendHTML(ctx, chatID, fmt.Sprintf("📊 Masukkan jumlah RR untuk <b>%s</b> (LOSS) (contoh: 1, 1.5):", oldTrade.Symbol), threadID)
+		}
+		return true
+
+	case strings.HasPrefix(data, "hist:page:"):
+		pageStr := strings.TrimPrefix(data, "hist:page:")
+		page, _ := strconv.Atoi(pageStr)
+		trades, err := h.trades.GetTrades(ctx, userID)
+		if err != nil || len(trades) == 0 {
+			return true
+		}
+		text, rows := FormatHistoryPage(trades, page, 5)
+		_ = h.sender.EditWithKeyboard(ctx, chatID, cb.Message.MessageID, text, rows)
+		return true
+
+	case strings.HasPrefix(data, "hist:del:"):
+		tradeID := strings.TrimPrefix(data, "hist:del:")
+		trade, err := h.findUserTrade(ctx, userID, tradeID)
+		if err != nil {
+			_, _ = h.sender.SendText(ctx, chatID, "❌ Trade tidak ditemukan.", threadID)
+			return true
+		}
+		h.deleteTradeAndNotify(ctx, userID, trade, chatID, threadID)
+		return true
+
+	case strings.HasPrefix(data, "hist:edit:"):
+		tradeID := strings.TrimPrefix(data, "hist:edit:")
+		trade, err := h.findUserTrade(ctx, userID, tradeID)
+		if err != nil {
+			_, _ = h.sender.SendText(ctx, chatID, "❌ Trade tidak ditemukan.", threadID)
+			return true
+		}
+		text, rows := FormatEditTradeMenu(trade)
+		_, _ = h.sender.SendWithKeyboard(ctx, chatID, text, rows, threadID)
+		return true
+
+	case strings.HasPrefix(data, "editf:"):
+		parts := strings.SplitN(data, ":", 3)
+		if len(parts) != 3 {
+			return true
+		}
+		field, tradeID := parts[1], parts[2]
+		trade, err := h.findUserTrade(ctx, userID, tradeID)
+		if err != nil {
+			_, _ = h.sender.SendText(ctx, chatID, "❌ Trade tidak ditemukan.", threadID)
+			return true
+		}
+		switch field {
+		case "symbol":
+			h.setEditSession(userID, &TradeEditSession{
+				TradeID:  tradeID,
+				OldTrade: *trade,
+				NewTrade: *trade,
+				Field:    EditFieldSymbol,
+				ChatID:   chatID,
+				ThreadID: threadID,
+			})
+			_, _ = h.sender.SendHTML(ctx, chatID, "🔤 Masukkan pair/symbol baru (contoh: XAUUSD, EURUSD):", threadID)
+		case "conf":
+			h.setEditSession(userID, &TradeEditSession{
+				TradeID:  tradeID,
+				OldTrade: *trade,
+				NewTrade: *trade,
+				Field:    EditFieldConfluence,
+				ChatID:   chatID,
+				ThreadID: threadID,
+			})
+			_, _ = h.sender.SendHTML(ctx, chatID, "📝 Masukkan confluence baru:", threadID)
+		case "dir":
+			rows := [][]InlineButton{
+				{
+					{Text: "🟢 BUY", CallbackData: "editv:dir:BUY:" + tradeID},
+					{Text: "🔴 SELL", CallbackData: "editv:dir:SELL:" + tradeID},
+				},
+			}
+			_, _ = h.sender.SendWithKeyboard(ctx, chatID, "↕️ Pilih direction baru:", rows, threadID)
+		case "status":
+			rows := [][]InlineButton{
+				{
+					{Text: "✅ WIN", CallbackData: "open:win:" + tradeID},
+					{Text: "❌ LOSS", CallbackData: "open:loss:" + tradeID},
+				},
+				{
+					{Text: "➖ BE", CallbackData: "open:be:" + tradeID},
+					{Text: "⏳ OPEN", CallbackData: "open:open:" + tradeID},
+				},
+			}
+			_, _ = h.sender.SendWithKeyboard(ctx, chatID, "🎯 Pilih status baru:", rows, threadID)
+		case "session":
+			rows := [][]InlineButton{
+				{
+					{Text: "Asia", CallbackData: "editv:session:Asia:" + tradeID},
+					{Text: "London", CallbackData: "editv:session:London:" + tradeID},
+				},
+				{
+					{Text: "NY AM", CallbackData: "editv:session:NY AM:" + tradeID},
+					{Text: "NY PM", CallbackData: "editv:session:NY PM:" + tradeID},
+				},
+			}
+			_, _ = h.sender.SendWithKeyboard(ctx, chatID, "🕒 Pilih session baru:", rows, threadID)
+		}
+		return true
+
+	case strings.HasPrefix(data, "editv:"):
+		parts := strings.SplitN(data, ":", 4)
+		if len(parts) != 4 {
+			return true
+		}
+		field, val, tradeID := parts[1], parts[2], parts[3]
+		oldTrade, err := h.findUserTrade(ctx, userID, tradeID)
+		if err != nil {
+			_, _ = h.sender.SendText(ctx, chatID, "❌ Trade tidak ditemukan.", threadID)
+			return true
+		}
+		newTrade := *oldTrade
+		switch field {
+		case "dir":
+			newTrade.Direction = domain.Direction(val)
+		case "session":
+			newTrade.TimeWindow = domain.TimeWindow(val)
+		}
+		h.applyTradeUpdate(ctx, userID, oldTrade, &newTrade, chatID, threadID)
+		return true
+	}
+
+	return false
+}
+
+func (h *Handler) handleTradeEditInput(ctx context.Context, msg *Message, sess *TradeEditSession) {
+	text := strings.TrimSpace(msg.Text)
+	if text == "" {
+		return
+	}
+	newTrade := sess.NewTrade
+	switch sess.Field {
+	case EditFieldSymbol:
+		newTrade.Symbol = strings.ToUpper(strings.ReplaceAll(text, "/", ""))
+		newTrade.AssetType = domain.DetectAssetType(newTrade.Symbol)
+	case EditFieldConfluence:
+		newTrade.Confluence = text
+	case EditFieldResultRR:
+		v, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Masukkan angka yang valid untuk RR (contoh: 2, 1.5).", sess.ThreadID)
+			return
+		}
+		if newTrade.Status == domain.StatusWin && v < 0 {
+			v = -v
+		} else if newTrade.Status == domain.StatusLoss && v > 0 {
+			v = -v
+		}
+		newTrade.ResultRR = v
+	}
+	h.removeEditSession(msg.From.ID)
+	h.applyTradeUpdate(ctx, msg.From.ID, &sess.OldTrade, &newTrade, sess.ChatID, sess.ThreadID)
 }

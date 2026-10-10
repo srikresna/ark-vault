@@ -7,10 +7,11 @@ import (
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
 
-// TradeRepository defines persistence operations for trades consumed by services.
 type TradeRepository interface {
 	SaveTrade(ctx context.Context, memberID int64, trade *domain.Trade) error
 	GetTrades(ctx context.Context, memberID int64) ([]domain.Trade, error)
+	UpdateTrade(ctx context.Context, memberID int64, trade *domain.Trade) error
+	DeleteTrade(ctx context.Context, memberID int64, tradeID string) error
 }
 
 // MemberRepository defines persistence operations for members consumed by services.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
@@ -31,18 +32,25 @@ func NewLeaderboardService(tr TradeRepository, mr MemberRepository) *Leaderboard
 // GetLeaderboard returns top N members sorted by the given metric.
 // metric: "winrate" or "rr". minTrades is the minimum trade count to qualify.
 func (s *LeaderboardService) GetLeaderboard(ctx context.Context, metric string, topN, minTrades int) ([]LeaderboardEntry, error) {
+	return s.GetLeaderboardByPeriod(ctx, metric, "all", topN, minTrades)
+}
+
+// GetLeaderboardByPeriod returns top N members sorted by metric ("winrate" or "rr") for a given period ("week", "month", "all").
+func (s *LeaderboardService) GetLeaderboardByPeriod(ctx context.Context, metric, period string, topN, minTrades int) ([]LeaderboardEntry, error) {
 	members, err := s.members.ListMembers(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
 	}
 
+	now := time.Now().In(wib)
 	var entries []LeaderboardEntry
 	for _, m := range members {
 		trades, err := s.trades.GetTrades(ctx, m.TelegramID)
 		if err != nil {
 			continue
 		}
-		stats := domain.CalculateStats(trades)
+		filtered := domain.FilterTradesByPeriod(trades, period, now)
+		stats := domain.CalculateStats(filtered)
 		if stats.TotalTrades < minTrades {
 			continue
 		}

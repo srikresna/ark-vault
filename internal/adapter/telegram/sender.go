@@ -283,7 +283,10 @@ func (s *Sender) SetMyCommands(ctx context.Context, commands []BotCommand, scope
 func (s *Sender) RegisterCommandScopes(ctx context.Context, ownerID int64) error {
 	publicCmds := []BotCommand{
 		{Command: "journal", Description: "Catat trade (guided flow)"},
-		{Command: "stats", Description: "Statistik trading"},
+		{Command: "open", Description: "Lihat & tutup trade yang masih OPEN"},
+		{Command: "history", Description: "Riwayat trade (Edit & Hapus)"},
+		{Command: "undo", Description: "Hapus 1 trade terakhir"},
+		{Command: "stats", Description: "Statistik trading (all/week/month)"},
 		{Command: "leaderboard", Description: "Top 10 trader komunitas"},
 		{Command: "profile", Description: "Profil level, XP & streak"},
 		{Command: "badges", Description: "Koleksi badge pencapaian"},

@@ -116,3 +116,61 @@ func TestTradeRepo_CachesTradesAndInvalidatesOnSave(t *testing.T) {
 		t.Fatalf("expected 2 trades and 2 Notion query calls after cache invalidation, got %d trades, %d calls", len(trades3), queryCalls)
 	}
 }
+
+func TestTradeRepo_UpdateAndDeleteTrade(t *testing.T) {
+	var updatedPageID string
+	var archivedPageID string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPatch && r.URL.Path == "/v1/pages/t-99" {
+			updatedPageID = "t-99"
+			_, _ = w.Write([]byte(`{"id":"t-99"}`))
+			return
+		}
+		if r.Method == http.MethodPatch && r.URL.Path == "/v1/pages/t-del" {
+			archivedPageID = "t-del"
+			_, _ = w.Write([]byte(`{"id":"t-del","archived":true}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := NewClient("token")
+	client.baseURL = srv.URL + "/v1"
+	memberRepo := NewMemberRepo(client, "parent-1")
+	tradeCache := newMockTradeCacheStore()
+	_ = tradeCache.SaveCachedTrades(context.Background(), 555, []domain.Trade{{ID: "t-99"}})
+
+	tradeRepo := NewTradeRepo(client, memberRepo, tradeCache)
+
+	err := tradeRepo.UpdateTrade(context.Background(), 555, &domain.Trade{
+		ID:        "t-99",
+		Symbol:    "XAUUSD",
+		AssetType: domain.AssetGold,
+		Direction: domain.DirBuy,
+		Status:    domain.StatusWin,
+		ResultRR:  2.5,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTrade failed: %v", err)
+	}
+	if updatedPageID != "t-99" {
+		t.Errorf("expected PATCH /v1/pages/t-99, got %q", updatedPageID)
+	}
+	if _, hit, _ := tradeCache.GetCachedTrades(context.Background(), 555); hit {
+		t.Errorf("expected cache invalidated after UpdateTrade")
+	}
+
+	_ = tradeCache.SaveCachedTrades(context.Background(), 555, []domain.Trade{{ID: "t-del"}})
+	if err := tradeRepo.DeleteTrade(context.Background(), 555, "t-del"); err != nil {
+		t.Fatalf("DeleteTrade failed: %v", err)
+	}
+	if archivedPageID != "t-del" {
+		t.Errorf("expected PATCH /v1/pages/t-del for archive, got %q", archivedPageID)
+	}
+	if _, hit, _ := tradeCache.GetCachedTrades(context.Background(), 555); hit {
+		t.Errorf("expected cache invalidated after DeleteTrade")
+	}
+}

@@ -241,3 +241,62 @@ func (s *GamificationService) GetStreak(ctx context.Context, memberID int64) (*d
 	}
 	return streak, nil
 }
+
+// TradeBaseXP computes the trade-intrinsic XP for a single trade (log + win bonus + screenshot).
+func TradeBaseXP(trade *domain.Trade) int {
+	if trade == nil {
+		return 0
+	}
+	xp := domain.XPTradeLogged
+	if trade.Status == domain.StatusWin {
+		if trade.ResultRR >= 2 {
+			xp += domain.XPWinHighRR
+		} else {
+			xp += domain.XPWinBonus
+		}
+	}
+	if trade.ScreenshotURL != "" {
+		xp += domain.XPScreenshot
+	}
+	return xp
+}
+
+// AdjustXPForTradeChange reconciles a member's XP and level when a trade is edited, closed, or deleted (newTrade == nil).
+func (s *GamificationService) AdjustXPForTradeChange(ctx context.Context, memberID int64, oldTrade, newTrade *domain.Trade) (*domain.GamificationProfile, int, error) {
+	profile, err := s.GetProfile(ctx, memberID)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	oldXP := TradeBaseXP(oldTrade)
+	newXP := TradeBaseXP(newTrade)
+	delta := newXP - oldXP
+	if delta == 0 {
+		return profile, 0, nil
+	}
+
+	now := time.Now().In(wib)
+	profile.TotalXP += delta
+	if profile.TotalXP < 0 {
+		profile.TotalXP = 0
+	}
+	profile.Level, profile.Title = domain.LevelForXP(profile.TotalXP)
+	profile.UpdatedAt = now
+
+	if err := s.store.SaveProfile(ctx, profile); err != nil {
+		return nil, 0, err
+	}
+	reason := "trade_edited"
+	if newTrade == nil {
+		reason = "trade_deleted"
+	}
+	if err := s.store.AppendXPEvent(ctx, &domain.XPEvent{
+		TelegramID: memberID,
+		Amount:     delta,
+		Reason:     reason,
+		Timestamp:  now,
+	}); err != nil {
+		return nil, 0, err
+	}
+	return profile, delta, nil
+}

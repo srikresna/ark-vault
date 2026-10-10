@@ -11,8 +11,24 @@ import (
 
 // FormatStats formats member stats as an HTML Telegram message.
 func FormatStats(username string, s *domain.Stats) string {
+	return FormatStatsWithPeriod(username, "all", s)
+}
+
+func periodLabel(period string) string {
+	switch strings.ToLower(strings.TrimSpace(period)) {
+	case "week", "weekly":
+		return "Minggu Ini"
+	case "month", "monthly":
+		return "Bulan Ini"
+	default:
+		return "All-Time"
+	}
+}
+
+// FormatStatsWithPeriod formats member stats for a specific period ("all", "week", "month").
+func FormatStatsWithPeriod(username, period string, s *domain.Stats) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "📊 <b>Stats — @%s</b>\n\n", username)
+	fmt.Fprintf(&sb, "📊 <b>Stats — @%s (%s)</b>\n\n", username, periodLabel(period))
 	fmt.Fprintf(&sb, "Total trades: <b>%d</b>\n", s.TotalTrades)
 	fmt.Fprintf(&sb, "Win/Loss/BE: <b>%d</b>/%d/%d\n", s.Wins, s.Losses, s.BreakEvens)
 	if s.OpenTrades > 0 {
@@ -20,9 +36,12 @@ func FormatStats(username string, s *domain.Stats) string {
 	}
 	fmt.Fprintf(&sb, "Win Rate: <b>%.1f%%</b>\n", s.WinRate)
 	fmt.Fprintf(&sb, "Avg RR: <b>%.2f</b>\n", s.AvgRR)
+	fmt.Fprintf(&sb, "Expectancy: <b>%+.2fR / trade</b>\n", s.Expectancy)
+	if s.ProfitFactor > 0 {
+		fmt.Fprintf(&sb, "Profit Factor: <b>%.2f</b>\n", s.ProfitFactor)
+	}
 	fmt.Fprintf(&sb, "Total RR: <b>%+.1fR</b>\n", s.TotalRR)
-	fmt.Fprintf(&sb, "Best: <b>%+.1fR</b>\n", s.BestRR)
-	fmt.Fprintf(&sb, "Worst: <b>%+.1fR</b>\n", s.WorstRR)
+	fmt.Fprintf(&sb, "Best: <b>%+.1fR</b> | Worst: <b>%+.1fR</b>\n", s.BestRR, s.WorstRR)
 
 	if s.CurStreak > 0 {
 		fmt.Fprintf(&sb, "Current streak: 🔥 <b>%d</b> wins\n", s.CurStreak)
@@ -31,6 +50,32 @@ func FormatStats(username string, s *domain.Stats) string {
 	}
 	if s.MaxWinStrk > 0 {
 		fmt.Fprintf(&sb, "Longest win streak: <b>%d</b>\n", s.MaxWinStrk)
+	}
+
+	// Per-session breakdown
+	if len(s.BySession) > 0 {
+		sb.WriteString("\n<b>Per Session:</b>\n")
+		sessions := []domain.TimeWindow{domain.SessionAsia, domain.SessionLondon, domain.SessionNYAM, domain.SessionNYPM}
+		seen := make(map[domain.TimeWindow]bool)
+		for _, tw := range sessions {
+			if ss, ok := s.BySession[tw]; ok && ss.Total > 0 {
+				fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n", tw, ss.Total, ss.WinRate, ss.TotalRR)
+				seen[tw] = true
+			}
+		}
+		for tw, ss := range s.BySession {
+			if !seen[tw] && ss.Total > 0 {
+				fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n", tw, ss.Total, ss.WinRate, ss.TotalRR)
+			}
+		}
+	}
+
+	// Top symbols breakdown
+	if len(s.TopSymbols) > 0 {
+		sb.WriteString("\n<b>Top Pairs:</b>\n")
+		for _, sym := range s.TopSymbols {
+			fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n", sym.Symbol, sym.Total, sym.WinRate, sym.TotalRR)
+		}
 	}
 
 	// Per-asset breakdown
@@ -47,14 +92,19 @@ func FormatStats(username string, s *domain.Stats) string {
 
 // FormatLeaderboard formats the leaderboard as an HTML Telegram message.
 func FormatLeaderboard(entries []service.LeaderboardEntry, metric string) string {
+	return FormatLeaderboardWithPeriod(entries, metric, "all")
+}
+
+// FormatLeaderboardWithPeriod formats the leaderboard for a given period ("all", "week", "month").
+func FormatLeaderboardWithPeriod(entries []service.LeaderboardEntry, metric, period string) string {
 	var sb strings.Builder
 	sb.WriteString("🏆 <b>Leaderboard</b>")
 	if metric == "rr" {
-		sb.WriteString(" (by RR)")
+		sb.WriteString(" (by RR")
 	} else {
-		sb.WriteString(" (by Win Rate)")
+		sb.WriteString(" (by Win Rate")
 	}
-	sb.WriteString("\n\n")
+	fmt.Fprintf(&sb, " — %s)\n\n", periodLabel(period))
 
 	medals := []string{"🥇", "🥈", "🥉"}
 	for i, e := range entries {
@@ -111,8 +161,11 @@ func FormatHelp() string {
 func FormatHelpForUser(isOwner bool) string {
 	help := `🔐 <b>ARK Vault — Help</b>
 
-<b>Mencatat Trade:</b>
+<b>Mencatat &amp; Kelola Trade:</b>
 • /journal — Guided flow (step-by-step dengan tombol)
+• /open — Lihat &amp; tutup trade yang masih OPEN
+• /history — Riwayat trade (bisa Edit &amp; Hapus trade mana saja)
+• /undo — Hapus 1 trade terakhir yang baru diinput
 • Kirim pesan dengan format:
 <pre>#journal
 Pair: XAUUSD
@@ -123,11 +176,10 @@ Confluence: FVG + OB mitigation on 15m</pre>
   Bisa attach screenshot bersamaan.
 
 <b>Statistik &amp; Ranking:</b>
-• /stats — Statistik personal
-• /stats @user — Statistik member lain
-• /leaderboard — Top 10 (win rate)
-• /leaderboard rr — Top 10 (total RR)
-
+• /stats [week|month] — Statistik personal
+• /stats @user [week|month] — Statistik member lain
+• /leaderboard [week|month] — Top 10 (win rate)
+• /leaderboard [week|month] rr — Top 10 (total RR)
 <b>Export &amp; Report:</b>
 • /export — Export journal (CSV)
 • /export pdf — Export journal (PDF)
@@ -566,4 +618,132 @@ func FormatMonthlyReportCard(r *domain.MonthlyReportCard) string {
 	}
 
 	return sb.String()
+}
+
+// FormatRevengeWarning returns a psychological cooldown warning if consecutive losses today >= 3.
+func FormatRevengeWarning(consecutiveLosses int) string {
+	if consecutiveLosses < 3 {
+		return ""
+	}
+	return fmt.Sprintf("\n⚠️ <b>Cooldown Warning:</b> Kamu sudah mengalami <b>%dx LOSS berturut-turut</b> hari ini. Istirahat sejenak, evaluasi setup &amp; emosimu, dan hindari <i>revenge trading</i>! 🧘‍♂️", consecutiveLosses)
+}
+
+// FormatOpenTrades formats the list of open trades with action buttons to close them.
+func FormatOpenTrades(trades []domain.Trade) (string, [][]InlineButton) {
+	if len(trades) == 0 {
+		return "📭 Tidak ada trade yang berstatus <b>OPEN</b> saat ini.", nil
+	}
+	var sb strings.Builder
+	sb.WriteString("⏳ <b>Open Trades</b>\nPilih hasil untuk menutup trade:\n\n")
+
+	limit := len(trades)
+	if limit > 8 {
+		limit = 8
+	}
+	var rows [][]InlineButton
+	for i := range limit {
+		t := trades[i]
+		fmt.Fprintf(&sb, "<b>#%d</b> %s <b>%s</b> (%s)", i+1, t.Date.Format("02 Jan"), t.Symbol, t.Direction)
+		if t.TimeWindow != "" {
+			fmt.Fprintf(&sb, " • %s", t.TimeWindow)
+		}
+		sb.WriteString("\n")
+		if t.ID != "" {
+			rows = append(rows, []InlineButton{
+				{Text: fmt.Sprintf("✅ #%d WIN", i+1), CallbackData: "open:win:" + t.ID},
+				{Text: fmt.Sprintf("❌ #%d LOSS", i+1), CallbackData: "open:loss:" + t.ID},
+				{Text: fmt.Sprintf("➖ #%d BE", i+1), CallbackData: "open:be:" + t.ID},
+			})
+		}
+	}
+	return sb.String(), rows
+}
+
+// FormatHistoryPage formats a paginated list of trades with Edit and Delete buttons.
+func FormatHistoryPage(trades []domain.Trade, page int, pageSize int) (string, [][]InlineButton) {
+	if len(trades) == 0 {
+		return "📭 Belum ada riwayat trade.", nil
+	}
+	if pageSize <= 0 {
+		pageSize = 5
+	}
+	totalPages := (len(trades) + pageSize - 1) / pageSize
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+	start := page * pageSize
+	end := start + pageSize
+	if end > len(trades) {
+		end = len(trades)
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "📜 <b>Riwayat Trade</b> (Hal %d/%d — Total %d)\n\n", page+1, totalPages, len(trades))
+
+	var rows [][]InlineButton
+	for i := start; i < end; i++ {
+		t := trades[i]
+		num := i + 1
+		rrStr := ""
+		if t.ResultRR != 0 || t.Status == domain.StatusBE {
+			rrStr = fmt.Sprintf(" (%+.1fR)", t.ResultRR)
+		}
+		fmt.Fprintf(&sb, "<b>#%d</b> • %s • <b>%s</b> %s — <b>%s</b>%s\n",
+			num, t.Date.Format("02 Jan"), t.Symbol, t.Direction, t.Status, rrStr)
+		if t.TimeWindow != "" || t.Confluence != "" {
+			fmt.Fprintf(&sb, "   <i>%s %s</i>\n", t.TimeWindow, t.Confluence)
+		}
+		if t.ID != "" {
+			rows = append(rows, []InlineButton{
+				{Text: fmt.Sprintf("✏️ Edit #%d", num), CallbackData: "hist:edit:" + t.ID},
+				{Text: fmt.Sprintf("🗑 Hapus #%d", num), CallbackData: "hist:del:" + t.ID},
+			})
+		}
+	}
+
+	if totalPages > 1 {
+		var nav []InlineButton
+		if page > 0 {
+			nav = append(nav, InlineButton{Text: "⬅️ Prev", CallbackData: fmt.Sprintf("hist:page:%d", page-1)})
+		}
+		if page+1 < totalPages {
+			nav = append(nav, InlineButton{Text: "Next ➡️", CallbackData: fmt.Sprintf("hist:page:%d", page+1)})
+		}
+		if len(nav) > 0 {
+			rows = append(rows, nav)
+		}
+	}
+
+	return sb.String(), rows
+}
+
+// FormatEditTradeMenu builds the inline menu for editing a specific trade.
+func FormatEditTradeMenu(t *domain.Trade) (string, [][]InlineButton) {
+	var sb strings.Builder
+	sb.WriteString("✏️ <b>Edit Trade</b>\n\n")
+	fmt.Fprintf(&sb, "Symbol: <b>%s</b> (%s)\n", t.Symbol, t.AssetType.String())
+	fmt.Fprintf(&sb, "Direction: <b>%s</b>\n", t.Direction)
+	fmt.Fprintf(&sb, "Status: <b>%s</b> (%+.1fR)\n", t.Status, t.ResultRR)
+	fmt.Fprintf(&sb, "Session: <b>%s</b>\n", t.TimeWindow)
+	fmt.Fprintf(&sb, "Confluence: %s\n\n", t.Confluence)
+	sb.WriteString("Pilih bagian yang ingin diubah:")
+
+	rows := [][]InlineButton{
+		{
+			{Text: "🔤 Pair/Symbol", CallbackData: "editf:symbol:" + t.ID},
+			{Text: "↕️ Direction", CallbackData: "editf:dir:" + t.ID},
+		},
+		{
+			{Text: "🎯 Status & RR", CallbackData: "editf:status:" + t.ID},
+			{Text: "🕒 Session", CallbackData: "editf:session:" + t.ID},
+		},
+		{
+			{Text: "📝 Confluence", CallbackData: "editf:conf:" + t.ID},
+			{Text: "🗑 Hapus Trade", CallbackData: "hist:del:" + t.ID},
+		},
+	}
+	return sb.String(), rows
 }

@@ -109,6 +109,42 @@ func (r *TradeRepo) GetTrades(ctx context.Context, memberID int64) ([]domain.Tra
 	return trades, nil
 }
 
+// UpdateTrade updates an existing trade page in Notion and invalidates the member's trade cache.
+func (r *TradeRepo) UpdateTrade(ctx context.Context, memberID int64, trade *domain.Trade) error {
+	if trade == nil || trade.ID == "" {
+		return fmt.Errorf("trade ID is required for update")
+	}
+	trade.AutoDetectAsset()
+	props := r.buildTradeProperties(trade)
+	payload := map[string]interface{}{
+		"properties": props,
+	}
+	if _, err := r.client.UpdatePage(ctx, trade.ID, payload); err != nil {
+		return fmt.Errorf("update trade page: %w", err)
+	}
+	if r.cacheStore != nil {
+		_ = r.cacheStore.InvalidateCachedTrades(ctx, memberID)
+	}
+	return nil
+}
+
+// DeleteTrade archives a trade page in Notion and invalidates the member's trade cache.
+func (r *TradeRepo) DeleteTrade(ctx context.Context, memberID int64, tradeID string) error {
+	if tradeID == "" {
+		return fmt.Errorf("trade ID is required for delete")
+	}
+	payload := map[string]interface{}{
+		"archived": true,
+	}
+	if _, err := r.client.UpdatePage(ctx, tradeID, payload); err != nil {
+		return fmt.Errorf("archive trade page: %w", err)
+	}
+	if r.cacheStore != nil {
+		_ = r.cacheStore.InvalidateCachedTrades(ctx, memberID)
+	}
+	return nil
+}
+
 // buildTradeProperties converts a Trade to Notion page properties.
 func (r *TradeRepo) buildTradeProperties(t *domain.Trade) map[string]interface{} {
 	props := map[string]interface{}{
@@ -135,7 +171,7 @@ func (r *TradeRepo) buildTradeProperties(t *domain.Trade) map[string]interface{}
 			},
 		}
 	}
-	if t.ResultRR != 0 {
+	if t.ResultRR != 0 || t.Status == domain.StatusBE || t.Status == domain.StatusOpen {
 		props["Result RR"] = map[string]interface{}{"number": t.ResultRR}
 	}
 	if t.TimeWindow != "" {

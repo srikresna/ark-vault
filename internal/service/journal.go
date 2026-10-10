@@ -64,13 +64,48 @@ func (s *JournalService) UploadScreenshot(ctx context.Context, tradeID string, f
 
 // GetMemberStats retrieves all trades for a member and calculates stats.
 func (s *JournalService) GetMemberStats(ctx context.Context, memberTgID int64) (*domain.Stats, error) {
+	return s.GetMemberStatsByPeriod(ctx, memberTgID, "all")
+}
+
+// GetMemberStatsByPeriod retrieves trades for a member filtered by period ("week", "month", "all") and calculates stats.
+func (s *JournalService) GetMemberStatsByPeriod(ctx context.Context, memberTgID int64, period string) (*domain.Stats, error) {
 	trades, err := s.trades.GetTrades(ctx, memberTgID)
 	if err != nil {
 		return nil, fmt.Errorf("get trades: %w", err)
 	}
-	if len(trades) == 0 {
+	filtered := domain.FilterTradesByPeriod(trades, period, time.Now().In(wib))
+	if len(filtered) == 0 {
 		return nil, nil
 	}
-	stats := domain.CalculateStats(trades)
+	stats := domain.CalculateStats(filtered)
 	return &stats, nil
+}
+
+// GetOpenTrades returns all trades currently in OPEN status for a member.
+func (s *JournalService) GetOpenTrades(ctx context.Context, memberTgID int64) ([]domain.Trade, error) {
+	trades, err := s.trades.GetTrades(ctx, memberTgID)
+	if err != nil {
+		return nil, fmt.Errorf("get trades: %w", err)
+	}
+	var open []domain.Trade
+	for _, t := range trades {
+		if t.Status == domain.StatusOpen {
+			open = append(open, t)
+		}
+	}
+	return open, nil
+}
+
+// UpdateTrade validates and updates an existing trade entry.
+func (s *JournalService) UpdateTrade(ctx context.Context, memberTgID int64, trade *domain.Trade) error {
+	trade.AutoDetectAsset()
+	if err := trade.Validate(); err != nil {
+		return fmt.Errorf("validation: %w", err)
+	}
+	return s.trades.UpdateTrade(ctx, memberTgID, trade)
+}
+
+// DeleteTrade archives/deletes a trade entry by ID.
+func (s *JournalService) DeleteTrade(ctx context.Context, memberTgID int64, tradeID string) error {
+	return s.trades.DeleteTrade(ctx, memberTgID, tradeID)
 }
