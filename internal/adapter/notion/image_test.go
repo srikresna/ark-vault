@@ -31,7 +31,7 @@ func TestImageRepo_Upload_UsesNotionFileUpload(t *testing.T) {
 			if err != nil {
 				t.Errorf("expected form file 'file': %v", err)
 			} else {
-				defer f.Close()
+				defer func() { _ = f.Close() }()
 				b, _ := io.ReadAll(f)
 				if string(b) == "fake-jpeg-bytes" && hdr.Filename == "screenshot_page1.jpg" {
 					sentMultipart = true

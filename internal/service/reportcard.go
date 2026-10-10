@@ -212,16 +212,16 @@ type reportAssetAccumulator struct {
 func (s *ReportCardService) generateAISummary(ctx context.Context, report *domain.MonthlyReportCard) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("Kamu adalah trading coach profesional. Buatkan ringkasan singkat (2-3 kalimat) dalam Bahasa Indonesia untuk monthly report card trader ini.\n\n")
-	sb.WriteString(fmt.Sprintf("Bulan: %s\n", report.YearMonth))
-	sb.WriteString(fmt.Sprintf("Total trades: %d (Win: %d, Loss: %d, BE: %d)\n", report.TotalTrades, report.Wins, report.Losses, report.BreakEvens))
-	sb.WriteString(fmt.Sprintf("Win Rate: %.1f%%, Total RR: %+.1f\n", report.WinRate, report.TotalRR))
-	sb.WriteString(fmt.Sprintf("Best: %+.1fR, Worst: %+.1fR\n", report.BestTrade, report.WorstTrade))
-	sb.WriteString(fmt.Sprintf("Level: %d — %s, XP earned: %d\n", report.Level, report.Title, report.XPEarned))
+	fmt.Fprintf(&sb, "Bulan: %s\n", report.YearMonth)
+	fmt.Fprintf(&sb, "Total trades: %d (Win: %d, Loss: %d, BE: %d)\n", report.TotalTrades, report.Wins, report.Losses, report.BreakEvens)
+	fmt.Fprintf(&sb, "Win Rate: %.1f%%, Total RR: %+.1f\n", report.WinRate, report.TotalRR)
+	fmt.Fprintf(&sb, "Best: %+.1fR, Worst: %+.1fR\n", report.BestTrade, report.WorstTrade)
+	fmt.Fprintf(&sb, "Level: %d — %s, XP earned: %d\n", report.Level, report.Title, report.XPEarned)
 
 	if len(report.AssetBreakdown) > 0 {
 		sb.WriteString("\nPer asset:\n")
 		for asset, stats := range report.AssetBreakdown {
-			sb.WriteString(fmt.Sprintf("- %s: %d trades, %.1f%% WR, %+.1fR\n", asset, stats.Total, stats.WinRate, stats.TotalRR))
+			fmt.Fprintf(&sb, "- %s: %d trades, %.1f%% WR, %+.1fR\n", asset, stats.Total, stats.WinRate, stats.TotalRR)
 		}
 	}
 

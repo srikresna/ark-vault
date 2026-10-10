@@ -114,7 +114,7 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 			} else {
 				msg += "\n\nHubungi admin komunitas untuk bergabung."
 			}
-			h.sender.SendHTML(ctx, chatID, msg, threadID)
+			_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
 		}
 		// Notify owner about unauthorized access attempt (at most once per user per hour)
 		if h.ownerID > 0 {
@@ -122,7 +122,7 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 				h.unauthNotified[userID] = time.Now()
 				notif := fmt.Sprintf("⚠️ <b>Unauthorized access attempt</b>\n\nUser: <a href=\"tg://user?id=%d\">%d</a>\nChat: <code>%d</code>\nType: %s",
 					userID, userID, chatID, chatType)
-				h.sender.SendHTML(ctx, h.ownerID, notif)
+				_, _ = h.sender.SendHTML(ctx, h.ownerID, notif)
 			}
 		}
 		return false
@@ -149,7 +149,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 	// Rate limiting (skip for #journal text which is passive)
 	if msg.From != nil && strings.HasPrefix(text, "/") {
 		if !h.limiter.Allow(msg.From.ID) {
-			h.sender.SendText(ctx, msg.Chat.ID, "⏳ Terlalu banyak request. Coba lagi nanti.", msg.MessageThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "⏳ Terlalu banyak request. Coba lagi nanti.", msg.MessageThreadID)
 			return
 		}
 	}
@@ -181,7 +181,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 		h.cmdReport(ctx, msg)
 	case strings.HasPrefix(text, "/help"), strings.HasPrefix(text, "/start"):
 		isOwner := msg.From != nil && h.ownerID > 0 && msg.From.ID == h.ownerID
-		h.sender.SendHTML(ctx, msg.Chat.ID, FormatHelpForUser(isOwner), msg.MessageThreadID)
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatHelpForUser(isOwner), msg.MessageThreadID)
 	case strings.HasPrefix(text, "/profile"):
 		h.cmdProfile(ctx, msg)
 	case strings.HasPrefix(text, "/badges"):
@@ -211,7 +211,7 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 
 	result := ParseJournalMessage(text)
 	if result.Err != "" {
-		h.sender.SendHTML(ctx, msg.Chat.ID, "❌ "+result.Err, msg.MessageThreadID)
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, "❌ "+result.Err, msg.MessageThreadID)
 		return
 	}
 
@@ -221,7 +221,7 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 
 	if err := h.svc.Journal.RecordTrade(ctx, msg.From.ID, username, firstName, trade); err != nil {
 		h.logger.Error("record trade failed", "error", err)
-		h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal menyimpan trade: "+err.Error(), msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal menyimpan trade: "+err.Error(), msg.MessageThreadID)
 		return
 	}
 
@@ -233,27 +233,27 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 	if h.svc.Gamification != nil {
 		gamResult, _ := h.svc.Gamification.OnTradeRecorded(ctx, msg.From.ID, trade)
 		if gamResult != nil {
-			h.sender.SendHTML(ctx, msg.Chat.ID, FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak), msg.MessageThreadID)
+			_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak), msg.MessageThreadID)
 			// Check for new badges
 			if h.svc.Badge != nil {
 				streak, _ := h.svc.Gamification.GetStreak(ctx, msg.From.ID)
 				newBadges, _ := h.svc.Badge.CheckAndAwardBadges(ctx, msg.From.ID, trade, streak)
 				if len(newBadges) > 0 {
-					h.sender.SendHTML(ctx, msg.Chat.ID, FormatBadgeUnlock(newBadges), msg.MessageThreadID)
+					_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatBadgeUnlock(newBadges), msg.MessageThreadID)
 				}
 			}
 			// Check goal completion
 			if h.svc.Goal != nil {
 				achieved, _ := h.svc.Goal.CheckGoalCompletion(ctx, msg.From.ID)
 				if achieved {
-					h.sender.SendHTML(ctx, msg.Chat.ID, "\xf0\x9f\x8e\xaf <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", msg.MessageThreadID)
+					_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, "\xf0\x9f\x8e\xaf <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", msg.MessageThreadID)
 				}
 			}
 			return
 		}
 	}
 	// fallback to original confirmation
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatTradeConfirmation(trade), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatTradeConfirmation(trade), msg.MessageThreadID)
 }
 
 // cmdJournal starts the guided flow.
@@ -286,7 +286,7 @@ func (h *Handler) cmdStats(ctx context.Context, msg *Message, text string) {
 		lookupUsername := strings.TrimPrefix(parts[1], "@")
 		member, err := h.findMemberByUsername(ctx, lookupUsername)
 		if err != nil || member == nil {
-			h.sender.SendText(ctx, msg.Chat.ID, fmt.Sprintf("📭 Member @%s belum pernah mencatat trade.", lookupUsername), msg.MessageThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, fmt.Sprintf("📭 Member @%s belum pernah mencatat trade.", lookupUsername), msg.MessageThreadID)
 			return
 		}
 		targetID = member.TelegramID
@@ -295,15 +295,15 @@ func (h *Handler) cmdStats(ctx context.Context, msg *Message, text string) {
 
 	stats, err := h.svc.Journal.GetMemberStats(ctx, targetID)
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat.", msg.MessageThreadID)
 		return
 	}
 	if stats == nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat.", msg.MessageThreadID)
 		return
 	}
 
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatStats(targetUsername, stats), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatStats(targetUsername, stats), msg.MessageThreadID)
 }
 
 // findMemberByUsername searches cached members by username.
@@ -329,11 +329,11 @@ func (h *Handler) cmdLeaderboard(ctx context.Context, msg *Message, text string)
 
 	entries, err := h.svc.Leaderboard.GetLeaderboard(ctx, metric, 10, 5)
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "❌ Error: "+err.Error(), msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Error: "+err.Error(), msg.MessageThreadID)
 		return
 	}
 
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatLeaderboard(entries, metric), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatLeaderboard(entries, metric), msg.MessageThreadID)
 }
 
 // cmdExport exports the member's trades as CSV or PDF.
@@ -343,16 +343,16 @@ func (h *Handler) cmdExport(ctx context.Context, msg *Message, text string) {
 	}
 	trades, err := h.trades.GetTrades(ctx, msg.From.ID)
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-export.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-export.", msg.MessageThreadID)
 		return
 	}
 	if len(trades) == 0 {
-		h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-export.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-export.", msg.MessageThreadID)
 		return
 	}
 
 	if h.exporter == nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "⚠️ Export belum tersedia.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "⚠️ Export belum tersedia.", msg.MessageThreadID)
 		return
 	}
 
@@ -373,19 +373,19 @@ func (h *Handler) cmdExport(ctx context.Context, msg *Message, text string) {
 		stats, _ := h.svc.Journal.GetMemberStats(ctx, msg.From.ID)
 		data, err := h.exporter.ExportPDF(ctx, username, trades, stats)
 		if err != nil {
-			h.sender.SendText(ctx, msg.Chat.ID, "❌ Export PDF gagal: "+err.Error(), msg.MessageThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Export PDF gagal: "+err.Error(), msg.MessageThreadID)
 			return
 		}
 		filename := fmt.Sprintf("journal_%s.pdf", username)
-		h.sender.SendDocument(ctx, msg.Chat.ID, filename, data, "📊 Export trade journal (PDF)", msg.MessageThreadID)
+		_ = h.sender.SendDocument(ctx, msg.Chat.ID, filename, data, "📊 Export trade journal (PDF)", msg.MessageThreadID)
 	default:
 		data, err := h.exporter.ExportCSV(ctx, trades)
 		if err != nil {
-			h.sender.SendText(ctx, msg.Chat.ID, "❌ Export CSV gagal: "+err.Error(), msg.MessageThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Export CSV gagal: "+err.Error(), msg.MessageThreadID)
 			return
 		}
 		filename := fmt.Sprintf("journal_%s.csv", username)
-		h.sender.SendDocument(ctx, msg.Chat.ID, filename, data, "📊 Export trade journal (CSV)", msg.MessageThreadID)
+		_ = h.sender.SendDocument(ctx, msg.Chat.ID, filename, data, "📊 Export trade journal (CSV)", msg.MessageThreadID)
 	}
 }
 
@@ -397,11 +397,11 @@ func (h *Handler) cmdReport(ctx context.Context, msg *Message) {
 
 	summary, err := h.svc.Report.GenerateWeeklySummary(ctx, weekStart, weekEnd)
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal generate report: "+err.Error(), msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal generate report: "+err.Error(), msg.MessageThreadID)
 		return
 	}
 
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatWeeklySummary(summary), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatWeeklySummary(summary), msg.MessageThreadID)
 }
 
 // SendScheduledReport sends the weekly report to a specific chat and optional topic thread.
@@ -427,16 +427,16 @@ func (h *Handler) cmdProfile(ctx context.Context, msg *Message) {
 	}
 	profile, err := h.svc.Gamification.GetProfile(ctx, msg.From.ID)
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat profil.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat profil.", msg.MessageThreadID)
 		return
 	}
 	streak, _ := h.svc.Gamification.GetStreak(ctx, msg.From.ID)
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatProfile(profile, streak), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatProfile(profile, streak), msg.MessageThreadID)
 }
 
 // handleCallback processes inline button presses.
 func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
-	h.sender.AnswerCallback(ctx, cb.ID, "")
+	_ = h.sender.AnswerCallback(ctx, cb.ID, "")
 
 	data := cb.Data
 	if data == "reset:confirm" || data == "reset:cancel" {
@@ -444,10 +444,10 @@ func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
 			return
 		}
 		if data == "reset:cancel" {
-			h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, "❌ Reset dibatalkan.")
+			_ = h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, "❌ Reset dibatalkan.")
 			return
 		}
-		h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, "⏳ Mereset seluruh data BadgerDB &amp; Notion...")
+		_ = h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, "⏳ Mereset seluruh data BadgerDB &amp; Notion...")
 		h.executeReset(ctx, cb.Message.Chat.ID, cb.Message.MessageThreadID)
 		return
 	}
@@ -463,14 +463,14 @@ func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
 	}
 	// Handle confirm actions WITHOUT holding session.mu to avoid deadlock
 	// (submitGuidedTrade acquires session.mu internally)
-	switch {
-	case data == "confirm:yes":
+	switch data {
+	case "confirm:yes":
 		h.submitGuidedTrade(ctx, cb.From, session)
 		return
-	case data == "confirm:no":
+	case "confirm:no":
 		h.guided.Remove(cb.From.ID)
 		if cb.Message != nil {
-			h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, "❌ Trade dibatalkan.")
+			_ = h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, "❌ Trade dibatalkan.")
 		}
 		return
 	}
@@ -533,11 +533,10 @@ func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
 	rows := convertButtons(btns)
 	if cb.Message != nil {
 		if len(rows) > 0 {
-			h.sender.EditWithKeyboard(ctx, cb.Message.Chat.ID, cb.Message.MessageID, text, rows)
+			_ = h.sender.EditWithKeyboard(ctx, cb.Message.Chat.ID, cb.Message.MessageID, text, rows)
 		} else {
-			h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, text)
+			_ = h.sender.EditMessage(ctx, cb.Message.Chat.ID, cb.Message.MessageID, text)
 		}
-		session.MsgID = cb.Message.MessageID
 	}
 }
 
@@ -556,15 +555,16 @@ func (h *Handler) handleGuidedInput(ctx context.Context, msg *Message, session *
 	case StepRRAmount:
 		v, err := strconv.ParseFloat(text, 64)
 		if err != nil {
-			h.sender.SendText(ctx, msg.Chat.ID, "❌ Masukkan angka yang valid untuk RR (contoh: 2, 1.5).", session.ThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Masukkan angka yang valid untuk RR (contoh: 2, 1.5).", session.ThreadID)
 			return
 		}
-		if session.Trade.Status == domain.StatusWin {
+		switch session.Trade.Status {
+		case domain.StatusWin:
 			if v < 0 {
 				v = -v
 			}
 			session.Trade.ResultRR = v
-		} else if session.Trade.Status == domain.StatusLoss {
+		case domain.StatusLoss:
 			if v > 0 {
 				v = -v
 			}
@@ -586,7 +586,7 @@ func (h *Handler) handleGuidedInput(ctx context.Context, msg *Message, session *
 			session.PhotoFileID = photo.FileID
 			session.Step = StepConfirm
 		} else {
-			h.sender.SendText(ctx, msg.Chat.ID, "❌ Kirim foto, atau tekan Skip.", session.ThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Kirim foto, atau tekan Skip.", session.ThreadID)
 			return
 		}
 
@@ -624,7 +624,7 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 	err := h.svc.Journal.RecordTrade(ctx, from.ID, from.Username, from.FirstName, trade)
 	if err != nil {
 		h.logger.Error("guided submit failed", "error", err)
-		h.sender.SendText(ctx, session.ChatID, "❌ Gagal menyimpan: "+err.Error(), session.ThreadID)
+		_, _ = h.sender.SendText(ctx, session.ChatID, "❌ Gagal menyimpan: "+err.Error(), session.ThreadID)
 		h.guided.Remove(from.ID)
 		return
 	}
@@ -641,20 +641,20 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 			h.logger.Error("gamification failed", "error", err)
 		} else {
 			// Send enhanced confirmation with XP info
-			h.sender.SendHTML(ctx, session.ChatID, FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak), session.ThreadID)
+			_, _ = h.sender.SendHTML(ctx, session.ChatID, FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak), session.ThreadID)
 			// Check for new badges
 			if h.svc.Badge != nil {
 				streak, _ := h.svc.Gamification.GetStreak(ctx, from.ID)
 				newBadges, _ := h.svc.Badge.CheckAndAwardBadges(ctx, from.ID, trade, streak)
 				if len(newBadges) > 0 {
-					h.sender.SendHTML(ctx, session.ChatID, FormatBadgeUnlock(newBadges), session.ThreadID)
+					_, _ = h.sender.SendHTML(ctx, session.ChatID, FormatBadgeUnlock(newBadges), session.ThreadID)
 				}
 			}
 			// Check goal completion
 			if h.svc.Goal != nil {
 				achieved, _ := h.svc.Goal.CheckGoalCompletion(ctx, from.ID)
 				if achieved {
-					h.sender.SendHTML(ctx, session.ChatID, "\xf0\x9f\x8e\xaf <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", session.ThreadID)
+					_, _ = h.sender.SendHTML(ctx, session.ChatID, "\xf0\x9f\x8e\xaf <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", session.ThreadID)
 				}
 			}
 			h.guided.Remove(from.ID)
@@ -662,7 +662,7 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 		}
 	}
 
-	h.sender.SendHTML(ctx, session.ChatID, FormatTradeConfirmation(trade), session.ThreadID)
+	_, _ = h.sender.SendHTML(ctx, session.ChatID, FormatTradeConfirmation(trade), session.ThreadID)
 	h.guided.Remove(from.ID)
 }
 
@@ -710,10 +710,10 @@ func (h *Handler) cmdBadges(ctx context.Context, msg *Message) {
 	}
 	badges, err := h.svc.Badge.GetBadges(ctx, msg.From.ID)
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat badges.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat badges.", msg.MessageThreadID)
 		return
 	}
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatBadgeList(badges), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatBadgeList(badges), msg.MessageThreadID)
 }
 
 // cmdChallenge shows the current weekly challenge and standings.
@@ -723,15 +723,15 @@ func (h *Handler) cmdChallenge(ctx context.Context, msg *Message) {
 	}
 	challenge, err := h.svc.Challenge.GetOrCreateChallenge(ctx, time.Now())
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat challenge.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat challenge.", msg.MessageThreadID)
 		return
 	}
 	standings, err := h.svc.Challenge.GetCurrentStandings(ctx, challenge)
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat standings.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat standings.", msg.MessageThreadID)
 		return
 	}
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatChallenge(challenge, standings), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatChallenge(challenge, standings), msg.MessageThreadID)
 }
 
 // cmdReminder handles /reminder on, /reminder off, /reminder (show status)
@@ -761,19 +761,19 @@ func (h *Handler) cmdReminder(ctx context.Context, msg *Message, text string) {
 			}
 			err := h.svc.Reminder.SetReminder(ctx, targetID, msg.Chat.ID, msg.MessageThreadID, true, hourVal)
 			if err != nil {
-				h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal mengatur reminder.", msg.MessageThreadID)
+				_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal mengatur reminder.", msg.MessageThreadID)
 				return
 			}
-			h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔔 %s diaktifkan jam <b>%02d:00 WIB</b>", label, hourVal), msg.MessageThreadID)
+			_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔔 %s diaktifkan jam <b>%02d:00 WIB</b>", label, hourVal), msg.MessageThreadID)
 		case "off":
 			err := h.svc.Reminder.SetReminder(ctx, targetID, msg.Chat.ID, msg.MessageThreadID, false, 0)
 			if err != nil {
-				h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal mengatur reminder.", msg.MessageThreadID)
+				_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal mengatur reminder.", msg.MessageThreadID)
 				return
 			}
-			h.sender.SendText(ctx, msg.Chat.ID, fmt.Sprintf("🔕 %s dinonaktifkan.", label), msg.MessageThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, fmt.Sprintf("🔕 %s dinonaktifkan.", label), msg.MessageThreadID)
 		default:
-			h.sender.SendHTML(ctx, msg.Chat.ID, FormatReminderHelp(), msg.MessageThreadID)
+			_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatReminderHelp(), msg.MessageThreadID)
 		}
 		return
 	}
@@ -781,10 +781,10 @@ func (h *Handler) cmdReminder(ctx context.Context, msg *Message, text string) {
 	// Show current status
 	pref, err := h.svc.Reminder.GetReminder(ctx, targetID)
 	if err != nil || pref == nil || !pref.Enabled {
-		h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔕 %s belum aktif.\n\nGunakan <code>/reminder on</code> untuk mengaktifkan.\nGunakan <code>/reminder on 19</code> untuk jam 19:00 WIB.", label), msg.MessageThreadID)
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔕 %s belum aktif.\n\nGunakan <code>/reminder on</code> untuk mengaktifkan.\nGunakan <code>/reminder on 19</code> untuk jam 19:00 WIB.", label), msg.MessageThreadID)
 		return
 	}
-	h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔔 %s aktif: <b>%02d:00 WIB</b>\n\nGunakan <code>/reminder off</code> untuk menonaktifkan.", label, pref.Hour), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, fmt.Sprintf("🔔 %s aktif: <b>%02d:00 WIB</b>\n\nGunakan <code>/reminder off</code> untuk menonaktifkan.", label, pref.Hour), msg.MessageThreadID)
 }
 
 // cmdGoal handles /goal, /goal set <type> <target>
@@ -799,7 +799,7 @@ func (h *Handler) cmdGoal(ctx context.Context, msg *Message, text string) {
 		goalType := domain.GoalType(strings.ToLower(parts[2]))
 		target, err := strconv.ParseFloat(parts[3], 64)
 		if err != nil || target <= 0 {
-			h.sender.SendText(ctx, msg.Chat.ID, "❌ Target harus angka positif.", msg.MessageThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Target harus angka positif.", msg.MessageThreadID)
 			return
 		}
 
@@ -808,36 +808,36 @@ func (h *Handler) cmdGoal(ctx context.Context, msg *Message, text string) {
 		case domain.GoalTotalTrades, domain.GoalTotalRR, domain.GoalWinRate, domain.GoalStreakDays:
 			// valid
 		default:
-			h.sender.SendHTML(ctx, msg.Chat.ID, FormatGoalHelp(), msg.MessageThreadID)
+			_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatGoalHelp(), msg.MessageThreadID)
 			return
 		}
 
 		goal, err := h.svc.Goal.SetGoal(ctx, msg.From.ID, goalType, target)
 		if err != nil {
-			h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal menyimpan goal.", msg.MessageThreadID)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal menyimpan goal.", msg.MessageThreadID)
 			return
 		}
-		h.sender.SendHTML(ctx, msg.Chat.ID, FormatGoalSet(goal), msg.MessageThreadID)
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatGoalSet(goal), msg.MessageThreadID)
 		return
 	}
 
 	// /goal — show progress
 	progress, err := h.svc.Goal.GetProgress(ctx, msg.From.ID)
 	if err != nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat goal.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat goal.", msg.MessageThreadID)
 		return
 	}
 	if progress == nil {
-		h.sender.SendHTML(ctx, msg.Chat.ID, FormatGoalHelp(), msg.MessageThreadID)
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatGoalHelp(), msg.MessageThreadID)
 		return
 	}
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatGoalProgress(progress), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatGoalProgress(progress), msg.MessageThreadID)
 }
 
 // cmdAnalyze shows AI-powered trade analytics.
 func (h *Handler) cmdAnalyze(ctx context.Context, msg *Message) {
 	if msg.From == nil || h.svc.Analytics == nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "\u26a0\ufe0f Fitur analytics belum tersedia.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "\u26a0\ufe0f Fitur analytics belum tersedia.", msg.MessageThreadID)
 		return
 	}
 	// Send "analyzing" message first since AI call can take a few seconds
@@ -847,22 +847,22 @@ func (h *Handler) cmdAnalyze(ctx context.Context, msg *Message) {
 	if err != nil {
 		h.logger.Error("analytics failed", "error", err)
 		if waitMsgID > 0 {
-			h.sender.EditMessage(ctx, msg.Chat.ID, waitMsgID, "\u274c Gagal menganalisis: "+err.Error())
+			_ = h.sender.EditMessage(ctx, msg.Chat.ID, waitMsgID, "\u274c Gagal menganalisis: "+err.Error())
 		}
 		return
 	}
 
 	// Delete waiting message and send result
 	if waitMsgID > 0 {
-		h.sender.DeleteMessage(ctx, msg.Chat.ID, waitMsgID)
+		_ = h.sender.DeleteMessage(ctx, msg.Chat.ID, waitMsgID)
 	}
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatAnalytics(analytics), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatAnalytics(analytics), msg.MessageThreadID)
 }
 
 // cmdReportCard shows monthly report card.
 func (h *Handler) cmdReportCard(ctx context.Context, msg *Message) {
 	if msg.From == nil || h.svc.ReportCard == nil {
-		h.sender.SendText(ctx, msg.Chat.ID, "\u26a0\ufe0f Fitur report card belum tersedia.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "\u26a0\ufe0f Fitur report card belum tersedia.", msg.MessageThreadID)
 		return
 	}
 
@@ -882,15 +882,15 @@ func (h *Handler) cmdReportCard(ctx context.Context, msg *Message) {
 	if err != nil {
 		h.logger.Error("report card failed", "error", err)
 		if waitMsgID > 0 {
-			h.sender.EditMessage(ctx, msg.Chat.ID, waitMsgID, "\u274c Gagal generate report: "+err.Error())
+			_ = h.sender.EditMessage(ctx, msg.Chat.ID, waitMsgID, "\u274c Gagal generate report: "+err.Error())
 		}
 		return
 	}
 
 	if waitMsgID > 0 {
-		h.sender.DeleteMessage(ctx, msg.Chat.ID, waitMsgID)
+		_ = h.sender.DeleteMessage(ctx, msg.Chat.ID, waitMsgID)
 	}
-	h.sender.SendHTML(ctx, msg.Chat.ID, FormatMonthlyReportCard(report), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatMonthlyReportCard(report), msg.MessageThreadID)
 }
 
 // cmdReset handles the owner-only /reset command. Non-owners are silently ignored.
@@ -914,7 +914,7 @@ func (h *Handler) cmdReset(ctx context.Context, msg *Message, text string) {
 		"1. Menghapus seluruh data gamifikasi, XP, level, streak, badge, challenge, goal, reminder &amp; cache AI di <b>BadgerDB</b>.\n" +
 		"2. Mengarsipkan seluruh halaman jurnal member &amp; database trade di <b>Notion</b>.\n\n" +
 		"Apakah Anda yakin?"
-	h.sender.SendWithKeyboard(ctx, msg.Chat.ID, prompt, rows, msg.MessageThreadID)
+	_, _ = h.sender.SendWithKeyboard(ctx, msg.Chat.ID, prompt, rows, msg.MessageThreadID)
 }
 
 func (h *Handler) executeReset(ctx context.Context, chatID int64, threadID int) {
@@ -924,16 +924,16 @@ func (h *Handler) executeReset(ctx context.Context, chatID int64, threadID int) 
 		archivedCount = n
 		if err != nil {
 			h.logger.Error("notion reset failed", "error", err)
-			h.sender.SendText(ctx, chatID, fmt.Sprintf("⚠️ Sebagian reset Notion gagal (%d diarsipkan): %v", archivedCount, err), threadID)
+			_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("⚠️ Sebagian reset Notion gagal (%d diarsipkan): %v", archivedCount, err), threadID)
 		}
 	}
 	if h.resetter != nil {
 		if err := h.resetter.Reset(); err != nil {
 			h.logger.Error("badger reset failed", "error", err)
-			h.sender.SendText(ctx, chatID, "❌ Gagal mereset BadgerDB: "+err.Error(), threadID)
+			_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal mereset BadgerDB: "+err.Error(), threadID)
 			return
 		}
 	}
 	msg := fmt.Sprintf("✅ <b>Reset selesai!</b>\n\n• BadgerDB: seluruh data gamifikasi &amp; cache dihapus\n• Notion: <b>%d</b> halaman jurnal diarsipkan", archivedCount)
-	h.sender.SendHTML(ctx, chatID, msg, threadID)
+	_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
 }

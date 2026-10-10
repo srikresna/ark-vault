@@ -173,18 +173,18 @@ func buildConfirmText(s *GuidedSession) string {
 	t := &s.Trade
 	var sb strings.Builder
 	sb.WriteString("📋 <b>Konfirmasi Trade:</b>\n\n")
-	sb.WriteString(fmt.Sprintf("Asset: <b>%s</b>\n", t.AssetType.String()))
-	sb.WriteString(fmt.Sprintf("Symbol: <b>%s</b>\n", t.Symbol))
-	sb.WriteString(fmt.Sprintf("Direction: <b>%s</b>\n", t.Direction))
-	sb.WriteString(fmt.Sprintf("Status: <b>%s</b>\n", t.Status))
+	fmt.Fprintf(&sb, "Asset: <b>%s</b>\n", t.AssetType.String())
+	fmt.Fprintf(&sb, "Symbol: <b>%s</b>\n", t.Symbol)
+	fmt.Fprintf(&sb, "Direction: <b>%s</b>\n", t.Direction)
+	fmt.Fprintf(&sb, "Status: <b>%s</b>\n", t.Status)
 	if t.Status == domain.StatusWin || t.Status == domain.StatusLoss {
-		sb.WriteString(fmt.Sprintf("Result RR: <b>%+.1fR</b>\n", t.ResultRR))
+		fmt.Fprintf(&sb, "Result RR: <b>%+.1fR</b>\n", t.ResultRR)
 	}
 	if t.TimeWindow != "" {
-		sb.WriteString(fmt.Sprintf("Session: <b>%s</b>\n", t.TimeWindow))
+		fmt.Fprintf(&sb, "Session: <b>%s</b>\n", t.TimeWindow)
 	}
 	if t.Confluence != "" {
-		sb.WriteString(fmt.Sprintf("Confluence: <b>%s</b>\n", t.Confluence))
+		fmt.Fprintf(&sb, "Confluence: <b>%s</b>\n", t.Confluence)
 	}
 	if s.PhotoURL != "" || s.PhotoFileID != "" {
 		sb.WriteString("Screenshot: ✅ attached\n")

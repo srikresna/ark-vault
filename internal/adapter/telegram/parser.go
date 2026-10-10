@@ -49,9 +49,10 @@ func ParseJournalMessage(text string) ParseResult {
 			parsed["symbol"] = true
 		case key == "type" || key == "direction":
 			dir := strings.ToUpper(val)
-			if dir == "BUY" || dir == "LONG" {
+			switch dir {
+			case "BUY", "LONG":
 				t.Direction = domain.DirBuy
-			} else if dir == "SELL" || dir == "SHORT" {
+			case "SELL", "SHORT":
 				t.Direction = domain.DirSell
 			}
 			parsed["direction"] = true

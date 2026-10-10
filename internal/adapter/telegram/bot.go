@@ -117,7 +117,7 @@ func (b *Bot) getUpdates(ctx context.Context) ([]Update, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -149,7 +149,7 @@ func (b *Bot) CheckChatMember(ctx context.Context, chatID int64, userID int64) (
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return false, err
@@ -189,7 +189,7 @@ func (b *Bot) GetFile(ctx context.Context, fileID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -220,7 +220,7 @@ func (b *Bot) GetFile(ctx context.Context, fileID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	return io.ReadAll(resp.Body)
 }

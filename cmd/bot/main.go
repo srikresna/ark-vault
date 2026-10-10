@@ -57,7 +57,7 @@ func main() {
 		logger.Error("failed to open badger store", "error", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Services
 	journalSvc := service.NewJournalService(tradeRepo, memberRepo, imageRepo)
@@ -177,7 +177,7 @@ func main() {
 					challenge, _ := challengeSvc.GetOrCreateChallenge(ctx, now)
 					if challenge != nil {
 						text := telegram.FormatChallengeResults(challenge, results)
-						sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID)
+						_, _ = sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID)
 					}
 				}
 			}
@@ -198,7 +198,7 @@ func main() {
 				}
 				if cfg.ReportChatID != 0 {
 					text := fmt.Sprintf("⚔️ <b>New Weekly Challenge!</b>\n\n<b>%s</b>\n%s\n\nGunakan /challenge untuk melihat standings.", challenge.Title, challenge.Description)
-					sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID)
+					_, _ = sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID)
 				}
 			}
 			return nil
@@ -220,7 +220,7 @@ func main() {
 			for _, pref := range dueReminders {
 				if pref.IsCommunity || pref.ChatID < 0 {
 					text := telegram.FormatCommunityReminder()
-					sender.SendHTML(ctx, pref.ChatID, text, pref.ThreadID)
+					_, _ = sender.SendHTML(ctx, pref.ChatID, text, pref.ThreadID)
 					continue
 				}
 				streak, _ := gamSvc.GetStreak(ctx, pref.TelegramID)
@@ -229,7 +229,7 @@ func main() {
 					streakDays = streak.CurrentStreak
 				}
 				text := telegram.FormatDailyReminder(streakDays)
-				sender.SendHTML(ctx, pref.ChatID, text, pref.ThreadID)
+				_, _ = sender.SendHTML(ctx, pref.ChatID, text, pref.ThreadID)
 			}
 			return nil
 		},
@@ -260,7 +260,7 @@ func main() {
 						text := telegram.FormatMonthlyReportCard(report)
 						// Send to report chat if configured
 						if cfg.ReportChatID != 0 {
-							sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID)
+							_, _ = sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID)
 						}
 					}
 				}

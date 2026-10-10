@@ -12,33 +12,33 @@ import (
 // FormatStats formats member stats as an HTML Telegram message.
 func FormatStats(username string, s *domain.Stats) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📊 <b>Stats — @%s</b>\n\n", username))
-	sb.WriteString(fmt.Sprintf("Total trades: <b>%d</b>\n", s.TotalTrades))
-	sb.WriteString(fmt.Sprintf("Win/Loss/BE: <b>%d</b>/%d/%d\n", s.Wins, s.Losses, s.BreakEvens))
+	fmt.Fprintf(&sb, "📊 <b>Stats — @%s</b>\n\n", username)
+	fmt.Fprintf(&sb, "Total trades: <b>%d</b>\n", s.TotalTrades)
+	fmt.Fprintf(&sb, "Win/Loss/BE: <b>%d</b>/%d/%d\n", s.Wins, s.Losses, s.BreakEvens)
 	if s.OpenTrades > 0 {
-		sb.WriteString(fmt.Sprintf("Open: %d\n", s.OpenTrades))
+		fmt.Fprintf(&sb, "Open: %d\n", s.OpenTrades)
 	}
-	sb.WriteString(fmt.Sprintf("Win Rate: <b>%.1f%%</b>\n", s.WinRate))
-	sb.WriteString(fmt.Sprintf("Avg RR: <b>%.2f</b>\n", s.AvgRR))
-	sb.WriteString(fmt.Sprintf("Total RR: <b>%+.1fR</b>\n", s.TotalRR))
-	sb.WriteString(fmt.Sprintf("Best: <b>%+.1fR</b>\n", s.BestRR))
-	sb.WriteString(fmt.Sprintf("Worst: <b>%+.1fR</b>\n", s.WorstRR))
+	fmt.Fprintf(&sb, "Win Rate: <b>%.1f%%</b>\n", s.WinRate)
+	fmt.Fprintf(&sb, "Avg RR: <b>%.2f</b>\n", s.AvgRR)
+	fmt.Fprintf(&sb, "Total RR: <b>%+.1fR</b>\n", s.TotalRR)
+	fmt.Fprintf(&sb, "Best: <b>%+.1fR</b>\n", s.BestRR)
+	fmt.Fprintf(&sb, "Worst: <b>%+.1fR</b>\n", s.WorstRR)
 
 	if s.CurStreak > 0 {
-		sb.WriteString(fmt.Sprintf("Current streak: 🔥 <b>%d</b> wins\n", s.CurStreak))
+		fmt.Fprintf(&sb, "Current streak: 🔥 <b>%d</b> wins\n", s.CurStreak)
 	} else if s.CurStreak < 0 {
-		sb.WriteString(fmt.Sprintf("Current streak: ❄️ <b>%d</b> losses\n", -s.CurStreak))
+		fmt.Fprintf(&sb, "Current streak: ❄️ <b>%d</b> losses\n", -s.CurStreak)
 	}
 	if s.MaxWinStrk > 0 {
-		sb.WriteString(fmt.Sprintf("Longest win streak: <b>%d</b>\n", s.MaxWinStrk))
+		fmt.Fprintf(&sb, "Longest win streak: <b>%d</b>\n", s.MaxWinStrk)
 	}
 
 	// Per-asset breakdown
 	if len(s.ByAsset) > 1 {
 		sb.WriteString("\n<b>Per Asset:</b>\n")
 		for at, as := range s.ByAsset {
-			sb.WriteString(fmt.Sprintf("  %s: %d trades, %.1f%% WR, %+.1fR\n",
-				at.String(), as.Total, as.WinRate, as.TotalRR))
+			fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n",
+				at.String(), as.Total, as.WinRate, as.TotalRR)
 		}
 	}
 
@@ -67,11 +67,11 @@ func FormatLeaderboard(entries []service.LeaderboardEntry, metric string) string
 			name = e.FirstName
 		}
 		if metric == "rr" {
-			sb.WriteString(fmt.Sprintf("%s <b>@%s</b> — %+.1fR (%d trades)\n",
-				rank, name, e.TotalRR, e.TotalTrades))
+			fmt.Fprintf(&sb, "%s <b>@%s</b> — %+.1fR (%d trades)\n",
+				rank, name, e.TotalRR, e.TotalTrades)
 		} else {
-			sb.WriteString(fmt.Sprintf("%s <b>@%s</b> — %.1f%% WR (%d trades)\n",
-				rank, name, e.WinRate, e.TotalTrades))
+			fmt.Fprintf(&sb, "%s <b>@%s</b> — %.1f%% WR (%d trades)\n",
+				rank, name, e.WinRate, e.TotalTrades)
 		}
 	}
 
@@ -86,18 +86,18 @@ func FormatLeaderboard(entries []service.LeaderboardEntry, metric string) string
 func FormatTradeConfirmation(t *domain.Trade) string {
 	var sb strings.Builder
 	sb.WriteString("✅ <b>Trade berhasil dicatat!</b>\n\n")
-	sb.WriteString(fmt.Sprintf("Symbol: <b>%s</b> (%s)\n", t.Symbol, t.AssetType.String()))
-	sb.WriteString(fmt.Sprintf("Direction: <b>%s</b>\n", t.Direction))
-	sb.WriteString(fmt.Sprintf("Status: <b>%s</b>", t.Status))
+	fmt.Fprintf(&sb, "Symbol: <b>%s</b> (%s)\n", t.Symbol, t.AssetType.String())
+	fmt.Fprintf(&sb, "Direction: <b>%s</b>\n", t.Direction)
+	fmt.Fprintf(&sb, "Status: <b>%s</b>", t.Status)
 	if t.ResultRR != 0 {
-		sb.WriteString(fmt.Sprintf(" (%+.1fR)", t.ResultRR))
+		fmt.Fprintf(&sb, " (%+.1fR)", t.ResultRR)
 	}
 	sb.WriteString("\n")
 	if t.TimeWindow != "" {
-		sb.WriteString(fmt.Sprintf("Session: <b>%s</b>\n", t.TimeWindow))
+		fmt.Fprintf(&sb, "Session: <b>%s</b>\n", t.TimeWindow)
 	}
 	if t.Confluence != "" {
-		sb.WriteString(fmt.Sprintf("Confluence: %s\n", t.Confluence))
+		fmt.Fprintf(&sb, "Confluence: %s\n", t.Confluence)
 	}
 	return sb.String()
 }
@@ -157,16 +157,16 @@ Confluence: FVG + OB mitigation on 15m</pre>
 func FormatWeeklySummary(s *service.WeeklySummary) string {
 	var sb strings.Builder
 	sb.WriteString("📈 <b>ARK Vault — Weekly Report</b>\n")
-	sb.WriteString(fmt.Sprintf("📅 %s — %s\n\n",
+	fmt.Fprintf(&sb, "📅 %s — %s\n\n",
 		s.PeriodStart.Format("02 Jan"),
-		s.PeriodEnd.Format("02 Jan 2006")))
+		s.PeriodEnd.Format("02 Jan 2006"))
 
-	sb.WriteString(fmt.Sprintf("Total trades: <b>%d</b>\n", s.TotalTrades))
-	sb.WriteString(fmt.Sprintf("Active members: <b>%d</b>\n", s.TotalMembers))
-	sb.WriteString(fmt.Sprintf("Community win rate: <b>%.1f%%</b>\n", s.CommunityWR))
-	sb.WriteString(fmt.Sprintf("Total RR: <b>%+.1fR</b>\n", s.TotalRR))
+	fmt.Fprintf(&sb, "Total trades: <b>%d</b>\n", s.TotalTrades)
+	fmt.Fprintf(&sb, "Active members: <b>%d</b>\n", s.TotalMembers)
+	fmt.Fprintf(&sb, "Community win rate: <b>%.1f%%</b>\n", s.CommunityWR)
+	fmt.Fprintf(&sb, "Total RR: <b>%+.1fR</b>\n", s.TotalRR)
 	if s.MostTraded != "" {
-		sb.WriteString(fmt.Sprintf("Most traded: <b>%s</b>\n", s.MostTraded))
+		fmt.Fprintf(&sb, "Most traded: <b>%s</b>\n", s.MostTraded)
 	}
 
 	if len(s.TopPerformers) > 0 {
@@ -181,8 +181,8 @@ func FormatWeeklySummary(s *service.WeeklySummary) string {
 			if name == "" {
 				name = e.FirstName
 			}
-			sb.WriteString(fmt.Sprintf("%s @%s — %+.1fR (%.1f%% WR)\n",
-				medal, name, e.TotalRR, e.WinRate))
+			fmt.Fprintf(&sb, "%s @%s — %+.1fR (%.1f%% WR)\n",
+				medal, name, e.TotalRR, e.WinRate)
 		}
 	}
 
@@ -198,13 +198,13 @@ func FormatTradeConfirmationWithXP(t *domain.Trade, xpGained int, totalXP int, l
 	base := FormatTradeConfirmation(t)
 	var sb strings.Builder
 	sb.WriteString(base)
-	sb.WriteString(fmt.Sprintf("\n⚡ +%d XP (total: %d)\n", xpGained, totalXP))
-	sb.WriteString(fmt.Sprintf("📊 Level %d — %s\n", level, title))
+	fmt.Fprintf(&sb, "\n⚡ +%d XP (total: %d)\n", xpGained, totalXP)
+	fmt.Fprintf(&sb, "📊 Level %d — %s\n", level, title)
 	if streak > 0 {
-		sb.WriteString(fmt.Sprintf("🔥 Streak: %d hari\n", streak))
+		fmt.Fprintf(&sb, "🔥 Streak: %d hari\n", streak)
 	}
 	if leveledUp {
-		sb.WriteString(fmt.Sprintf("\n🎉 <b>LEVEL UP!</b> Level %d — %s\n", level, title))
+		fmt.Fprintf(&sb, "\n🎉 <b>LEVEL UP!</b> Level %d — %s\n", level, title)
 	}
 	return sb.String()
 }
@@ -231,8 +231,8 @@ func FormatProfile(profile *domain.GamificationProfile, streak *domain.StreakDat
 	nextTitle := ""
 	if nextXP > 0 {
 		_, nextTitle = domain.LevelForXP(nextXP)
-		sb.WriteString(fmt.Sprintf("Level: <b>%d</b> — %s\n", lvl, title))
-		sb.WriteString(fmt.Sprintf("XP: <b>%d</b> / %d (next: %s)\n", totalXP, nextXP, nextTitle))
+		fmt.Fprintf(&sb, "Level: <b>%d</b> — %s\n", lvl, title)
+		fmt.Fprintf(&sb, "XP: <b>%d</b> / %d (next: %s)\n", totalXP, nextXP, nextTitle)
 
 		// Progress bar
 		var prevXP int
@@ -255,10 +255,10 @@ func FormatProfile(profile *domain.GamificationProfile, streak *domain.StreakDat
 			filled = 16
 		}
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", 16-filled)
-		sb.WriteString(fmt.Sprintf("[%s] %d%%\n", bar, progress))
+		fmt.Fprintf(&sb, "[%s] %d%%\n", bar, progress)
 	} else {
-		sb.WriteString(fmt.Sprintf("Level: <b>%d</b> — %s\n", lvl, title))
-		sb.WriteString(fmt.Sprintf("XP: <b>%d</b> (MAX LEVEL)\n", totalXP))
+		fmt.Fprintf(&sb, "Level: <b>%d</b> — %s\n", lvl, title)
+		fmt.Fprintf(&sb, "XP: <b>%d</b> (MAX LEVEL)\n", totalXP)
 		sb.WriteString("[████████████████] 100%\n")
 	}
 
@@ -269,8 +269,8 @@ func FormatProfile(profile *domain.GamificationProfile, streak *domain.StreakDat
 		longestStreak = streak.LongestStreak
 	}
 
-	sb.WriteString(fmt.Sprintf("\n🔥 Streak: <b>%d</b> hari berturut-turut\n", curStreak))
-	sb.WriteString(fmt.Sprintf("📊 Streak terpanjang: <b>%d</b> hari\n", longestStreak))
+	fmt.Fprintf(&sb, "\n🔥 Streak: <b>%d</b> hari berturut-turut\n", curStreak)
+	fmt.Fprintf(&sb, "📊 Streak terpanjang: <b>%d</b> hari\n", longestStreak)
 
 	return sb.String()
 }
@@ -292,13 +292,13 @@ func FormatBadgeList(badges []domain.BadgeAward) string {
 
 	for _, def := range domain.BadgeRegistry {
 		if t, ok := earnedMap[def.ID]; ok {
-			sb.WriteString(fmt.Sprintf("%s <b>%s</b> — %s\n   <i>Earned %s</i>\n", def.Emoji, def.Name, def.Description, t.Format("02 Jan 2006")))
+			fmt.Fprintf(&sb, "%s <b>%s</b> — %s\n   <i>Earned %s</i>\n", def.Emoji, def.Name, def.Description, t.Format("02 Jan 2006"))
 		} else {
-			sb.WriteString(fmt.Sprintf("🔒 <s>%s</s> — %s\n", def.Name, def.Description))
+			fmt.Fprintf(&sb, "🔒 <s>%s</s> — %s\n", def.Name, def.Description)
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n📊 %d/%d badges earned", len(badges), len(domain.BadgeRegistry)))
+	fmt.Fprintf(&sb, "\n📊 %d/%d badges earned", len(badges), len(domain.BadgeRegistry))
 	return sb.String()
 }
 
@@ -308,7 +308,7 @@ func FormatBadgeUnlock(badges []domain.BadgeAward) string {
 	for _, b := range badges {
 		def := domain.GetBadgeDefinition(b.BadgeID)
 		if def != nil {
-			sb.WriteString(fmt.Sprintf("\n🎖 <b>Badge Unlocked!</b> %s %s\n<i>%s</i>\n", def.Emoji, def.Name, def.Description))
+			fmt.Fprintf(&sb, "\n🎖 <b>Badge Unlocked!</b> %s %s\n<i>%s</i>\n", def.Emoji, def.Name, def.Description)
 		}
 	}
 	return sb.String()
@@ -318,9 +318,9 @@ func FormatBadgeUnlock(badges []domain.BadgeAward) string {
 func FormatChallenge(c *domain.WeeklyChallenge, standings []domain.ChallengeResult) string {
 	var sb strings.Builder
 	sb.WriteString("⚔️ <b>Weekly Challenge</b>\n")
-	sb.WriteString(fmt.Sprintf("📅 %s\n\n", c.YearWeek))
-	sb.WriteString(fmt.Sprintf("<b>%s</b>\n", c.Title))
-	sb.WriteString(fmt.Sprintf("%s\n\n", c.Description))
+	fmt.Fprintf(&sb, "📅 %s\n\n", c.YearWeek)
+	fmt.Fprintf(&sb, "<b>%s</b>\n", c.Title)
+	fmt.Fprintf(&sb, "%s\n\n", c.Description)
 
 	if c.Finalized {
 		sb.WriteString("🏁 <b>Challenge selesai!</b>\n\n")
@@ -352,7 +352,7 @@ func FormatChallenge(c *domain.WeeklyChallenge, standings []domain.ChallengeResu
 			valueStr = fmt.Sprintf("%.1f%%", s.Value)
 		}
 
-		sb.WriteString(fmt.Sprintf("%s @%s — %s\n", rank, name, valueStr))
+		fmt.Fprintf(&sb, "%s @%s — %s\n", rank, name, valueStr)
 	}
 
 	return sb.String()
@@ -362,7 +362,7 @@ func FormatChallenge(c *domain.WeeklyChallenge, standings []domain.ChallengeResu
 func FormatChallengeResults(c *domain.WeeklyChallenge, results []domain.ChallengeResult) string {
 	var sb strings.Builder
 	sb.WriteString("🏆 <b>Weekly Challenge Results!</b>\n")
-	sb.WriteString(fmt.Sprintf("📅 %s — <b>%s</b>\n\n", c.YearWeek, c.Title))
+	fmt.Fprintf(&sb, "📅 %s — <b>%s</b>\n\n", c.YearWeek, c.Title)
 
 	if len(results) == 0 {
 		sb.WriteString("Tidak ada peserta minggu ini.")
@@ -382,7 +382,7 @@ func FormatChallengeResults(c *domain.WeeklyChallenge, results []domain.Challeng
 		if name == "" {
 			name = fmt.Sprintf("user_%d", r.TelegramID)
 		}
-		sb.WriteString(fmt.Sprintf("%s @%s — %.1f\n", rank, name, r.Value))
+		fmt.Fprintf(&sb, "%s @%s — %.1f\n", rank, name, r.Value)
 	}
 
 	sb.WriteString("\nSelamat kepada para pemenang! 🎉")
@@ -405,7 +405,7 @@ func FormatDailyReminder(streakDays int) string {
 	var sb strings.Builder
 	sb.WriteString("📝 <b>Reminder: Jangan lupa jurnal hari ini!</b>\n\n")
 	if streakDays > 0 {
-		sb.WriteString(fmt.Sprintf("🔥 Streak kamu: <b>%d hari</b>\n", streakDays))
+		fmt.Fprintf(&sb, "🔥 Streak kamu: <b>%d hari</b>\n", streakDays)
 		sb.WriteString("Jangan sampai putus! Catat trade hari ini.\n")
 	} else {
 		sb.WriteString("Mulai streak baru dengan mencatat trade pertamamu hari ini.\n")
@@ -454,7 +454,7 @@ func FormatGoalSet(goal *domain.MonthlyGoal) string {
 func FormatGoalProgress(p *domain.GoalProgress) string {
 	var sb strings.Builder
 	g := p.Goal
-	sb.WriteString(fmt.Sprintf("🎯 <b>Monthly Goal — %s</b>\n\n", g.YearMonth))
+	fmt.Fprintf(&sb, "🎯 <b>Monthly Goal — %s</b>\n\n", g.YearMonth)
 
 	var typeLabel string
 	var currentStr, targetStr string
@@ -477,7 +477,7 @@ func FormatGoalProgress(p *domain.GoalProgress) string {
 		targetStr = fmt.Sprintf("%.0f", g.TargetValue)
 	}
 
-	sb.WriteString(fmt.Sprintf("<b>%s:</b> %s / %s\n", typeLabel, currentStr, targetStr))
+	fmt.Fprintf(&sb, "<b>%s:</b> %s / %s\n", typeLabel, currentStr, targetStr)
 
 	// Progress bar
 	pct := p.Percentage
@@ -492,7 +492,7 @@ func FormatGoalProgress(p *domain.GoalProgress) string {
 		filled = 16
 	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", 16-filled)
-	sb.WriteString(fmt.Sprintf("[%s] %.0f%%\n", bar, p.Percentage))
+	fmt.Fprintf(&sb, "[%s] %.0f%%\n", bar, p.Percentage)
 
 	if g.Achieved {
 		sb.WriteString("\n\u2705 <b>Goal tercapai!</b> \U0001f389")
@@ -506,59 +506,59 @@ func FormatAnalytics(a *domain.TradeAnalytics) string {
 	var sb strings.Builder
 	sb.WriteString("\U0001f916 <b>AI Trade Analytics</b>\n\n")
 
-	sb.WriteString(fmt.Sprintf("\U0001f4ca Berdasarkan <b>%d trades</b> (WR: %.1f%%, RR: %+.1f)\n\n", a.TotalTrades, a.WinRate, a.TotalRR))
+	fmt.Fprintf(&sb, "\U0001f4ca Berdasarkan <b>%d trades</b> (WR: %.1f%%, RR: %+.1f)\n\n", a.TotalTrades, a.WinRate, a.TotalRR)
 
 	if a.StrengthAnalysis != "" {
-		sb.WriteString(fmt.Sprintf("\U0001f4aa <b>Kekuatan:</b>\n%s\n\n", a.StrengthAnalysis))
+		fmt.Fprintf(&sb, "\U0001f4aa <b>Kekuatan:</b>\n%s\n\n", a.StrengthAnalysis)
 	}
 	if a.WeaknessAnalysis != "" {
-		sb.WriteString(fmt.Sprintf("\u26a0\ufe0f <b>Kelemahan:</b>\n%s\n\n", a.WeaknessAnalysis))
+		fmt.Fprintf(&sb, "\u26a0\ufe0f <b>Kelemahan:</b>\n%s\n\n", a.WeaknessAnalysis)
 	}
 	if a.PatternInsights != "" {
-		sb.WriteString(fmt.Sprintf("\U0001f50d <b>Pola Trading:</b>\n%s\n\n", a.PatternInsights))
+		fmt.Fprintf(&sb, "\U0001f50d <b>Pola Trading:</b>\n%s\n\n", a.PatternInsights)
 	}
 	if a.Recommendations != "" {
-		sb.WriteString(fmt.Sprintf("\U0001f4a1 <b>Rekomendasi:</b>\n%s\n\n", a.Recommendations))
+		fmt.Fprintf(&sb, "\U0001f4a1 <b>Rekomendasi:</b>\n%s\n\n", a.Recommendations)
 	}
 	if a.OverallAssessment != "" {
-		sb.WriteString(fmt.Sprintf("\U0001f4dd <b>Penilaian:</b>\n%s\n", a.OverallAssessment))
+		fmt.Fprintf(&sb, "\U0001f4dd <b>Penilaian:</b>\n%s\n", a.OverallAssessment)
 	}
 
-	sb.WriteString(fmt.Sprintf("\n<i>Generated: %s (cache 24h)</i>", a.GeneratedAt.Format("02 Jan 15:04")))
+	fmt.Fprintf(&sb, "\n<i>Generated: %s (cache 24h)</i>", a.GeneratedAt.Format("02 Jan 15:04"))
 	return sb.String()
 }
 
 // FormatMonthlyReportCard formats a monthly performance report card.
 func FormatMonthlyReportCard(r *domain.MonthlyReportCard) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("\U0001f4cb <b>Monthly Report Card \u2014 %s</b>\n\n", r.YearMonth))
+	fmt.Fprintf(&sb, "\U0001f4cb <b>Monthly Report Card \u2014 %s</b>\n\n", r.YearMonth)
 
 	sb.WriteString("<b>\U0001f4ca Statistik:</b>\n")
-	sb.WriteString(fmt.Sprintf("Total trades: <b>%d</b>\n", r.TotalTrades))
-	sb.WriteString(fmt.Sprintf("Win/Loss/BE: <b>%d</b>/%d/%d\n", r.Wins, r.Losses, r.BreakEvens))
-	sb.WriteString(fmt.Sprintf("Win Rate: <b>%.1f%%</b>\n", r.WinRate))
-	sb.WriteString(fmt.Sprintf("Total RR: <b>%+.1fR</b>\n", r.TotalRR))
-	sb.WriteString(fmt.Sprintf("Best: <b>%+.1fR</b> | Worst: <b>%+.1fR</b>\n\n", r.BestTrade, r.WorstTrade))
+	fmt.Fprintf(&sb, "Total trades: <b>%d</b>\n", r.TotalTrades)
+	fmt.Fprintf(&sb, "Win/Loss/BE: <b>%d</b>/%d/%d\n", r.Wins, r.Losses, r.BreakEvens)
+	fmt.Fprintf(&sb, "Win Rate: <b>%.1f%%</b>\n", r.WinRate)
+	fmt.Fprintf(&sb, "Total RR: <b>%+.1fR</b>\n", r.TotalRR)
+	fmt.Fprintf(&sb, "Best: <b>%+.1fR</b> | Worst: <b>%+.1fR</b>\n\n", r.BestTrade, r.WorstTrade)
 
 	sb.WriteString("<b>\U0001f3c6 Gamifikasi:</b>\n")
-	sb.WriteString(fmt.Sprintf("Level: <b>%d</b> \u2014 %s\n", r.Level, r.Title))
-	sb.WriteString(fmt.Sprintf("XP earned: <b>+%d</b>\n", r.XPEarned))
+	fmt.Fprintf(&sb, "Level: <b>%d</b> \u2014 %s\n", r.Level, r.Title)
+	fmt.Fprintf(&sb, "XP earned: <b>+%d</b>\n", r.XPEarned)
 	if r.BadgesEarned > 0 {
-		sb.WriteString(fmt.Sprintf("Badges earned: <b>%d</b>\n", r.BadgesEarned))
+		fmt.Fprintf(&sb, "Badges earned: <b>%d</b>\n", r.BadgesEarned)
 	}
 	if r.LongestStreak > 0 {
-		sb.WriteString(fmt.Sprintf("Longest streak: <b>%d hari</b>\n", r.LongestStreak))
+		fmt.Fprintf(&sb, "Longest streak: <b>%d hari</b>\n", r.LongestStreak)
 	}
 
 	if len(r.AssetBreakdown) > 0 {
 		sb.WriteString("\n<b>Per Asset:</b>\n")
 		for asset, stats := range r.AssetBreakdown {
-			sb.WriteString(fmt.Sprintf("  %s: %d trades, %.1f%% WR, %+.1fR\n", asset, stats.Total, stats.WinRate, stats.TotalRR))
+			fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n", asset, stats.Total, stats.WinRate, stats.TotalRR)
 		}
 	}
 
 	if r.AISummary != "" {
-		sb.WriteString(fmt.Sprintf("\n\U0001f916 <b>AI Summary:</b>\n%s\n", r.AISummary))
+		fmt.Fprintf(&sb, "\n\U0001f916 <b>AI Summary:</b>\n%s\n", r.AISummary)
 	}
 
 	if r.TotalTrades == 0 {

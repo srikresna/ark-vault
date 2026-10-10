@@ -100,10 +100,10 @@ func (s *AnalyticsService) GetAnalytics(ctx context.Context, telegramID int64) (
 func buildAnalyticsPrompt(trades []domain.Trade, total, wins, losses, breakEvens int, winRate, totalRR, avgRR float64) string {
 	var sb strings.Builder
 	sb.WriteString("Kamu adalah trading coach profesional. Analisis data trading berikut dalam Bahasa Indonesia.\n\n")
-	sb.WriteString(fmt.Sprintf("Total trades: %d\n", total))
-	sb.WriteString(fmt.Sprintf("Win: %d, Loss: %d, BE: %d\n", wins, losses, breakEvens))
-	sb.WriteString(fmt.Sprintf("Win Rate: %.1f%%\n", winRate))
-	sb.WriteString(fmt.Sprintf("Total RR: %+.1f, Avg RR: %+.2f\n\n", totalRR, avgRR))
+	fmt.Fprintf(&sb, "Total trades: %d\n", total)
+	fmt.Fprintf(&sb, "Win: %d, Loss: %d, BE: %d\n", wins, losses, breakEvens)
+	fmt.Fprintf(&sb, "Win Rate: %.1f%%\n", winRate)
+	fmt.Fprintf(&sb, "Total RR: %+.1f, Avg RR: %+.2f\n\n", totalRR, avgRR)
 
 	// Include recent trades (max 50 for token limit)
 	limit := len(trades)
@@ -114,14 +114,14 @@ func buildAnalyticsPrompt(trades []domain.Trade, total, wins, losses, breakEvens
 	sb.WriteString("Data trade terbaru:\n")
 	for i := 0; i < limit; i++ {
 		t := trades[i]
-		sb.WriteString(fmt.Sprintf("- %s %s %s %s RR:%+.1f Session:%s\n",
+		fmt.Fprintf(&sb, "- %s %s %s %s RR:%+.1f Session:%s\n",
 			t.Date.Format("2006-01-02"),
 			t.Symbol,
 			t.Direction,
 			t.Status,
 			t.ResultRR,
 			t.TimeWindow,
-		))
+		)
 	}
 
 	sb.WriteString("\nBerikan analisis dalam format berikut (tanpa markdown, plain text saja):\n")

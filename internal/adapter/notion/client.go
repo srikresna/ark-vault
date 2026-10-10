@@ -62,7 +62,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}) 
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -182,7 +182,7 @@ func (c *Client) SendFileUpload(ctx context.Context, uploadID, filename, content
 	if err != nil {
 		return fmt.Errorf("send file request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

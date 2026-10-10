@@ -58,7 +58,7 @@ func (s *Sender) call(ctx context.Context, method string, payload interface{}) (
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -216,7 +216,7 @@ func (s *Sender) SendDocument(ctx context.Context, chatID int64, filename string
 	if _, err := part.Write(data); err != nil {
 		return err
 	}
-	w.Close()
+	_ = w.Close()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.apiURL("sendDocument"), &buf)
 	if err != nil {
@@ -228,7 +228,7 @@ func (s *Sender) SendDocument(ctx context.Context, chatID int64, filename string
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {

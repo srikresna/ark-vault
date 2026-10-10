@@ -42,8 +42,7 @@ func (s *JournalService) RecordTrade(ctx context.Context, memberTgID int64, user
 		FirstName:  firstName,
 		JoinDate:   time.Now().UTC(),
 	}
-	member, err := s.members.EnsureMember(ctx, member)
-	if err != nil {
+	if _, err := s.members.EnsureMember(ctx, member); err != nil {
 		return fmt.Errorf("ensure member: %w", err)
 	}
 

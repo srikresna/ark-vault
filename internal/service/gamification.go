@@ -84,12 +84,13 @@ func (s *GamificationService) OnTradeRecorded(ctx context.Context, memberID int6
 
 	// 4. Update streak
 	streakIncremented := false
-	if streak.LastLogDate == today {
+	switch streak.LastLogDate {
+	case today:
 		// Already logged today — no streak change.
-	} else if streak.LastLogDate == yesterday {
+	case yesterday:
 		streak.CurrentStreak++
 		streakIncremented = true
-	} else {
+	default:
 		streak.CurrentStreak = 1
 		streakIncremented = true
 	}
