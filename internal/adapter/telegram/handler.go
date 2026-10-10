@@ -9,10 +9,15 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 	"github.com/arkcode369/ark-vault/internal/service"
 	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
+
+// Exporter generates downloadable files from trade data.
+type Exporter interface {
+	ExportCSV(ctx context.Context, trades []domain.Trade) ([]byte, error)
+	ExportPDF(ctx context.Context, username string, trades []domain.Trade, stats *domain.Stats) ([]byte, error)
+}
 
 // Services bundles all application services for the handler.
 type Services struct {
@@ -43,9 +48,9 @@ type Handler struct {
 	sender           *Sender
 	bot              *Bot
 	svc              Services
-	exporter         ports.Exporter
-	trades           ports.TradeRepository
-	members          ports.MemberRepository
+	exporter         Exporter
+	trades           service.TradeRepository
+	members          service.MemberRepository
 	resetter         Resetter
 	guided           *GuidedFlow
 	limiter          *RateLimiter
@@ -59,9 +64,9 @@ type Handler struct {
 func NewHandler(
 	sender *Sender,
 	svc Services,
-	exporter ports.Exporter,
-	trades ports.TradeRepository,
-	members ports.MemberRepository,
+	exporter Exporter,
+	trades service.TradeRepository,
+	members service.MemberRepository,
 	limiter *RateLimiter,
 	logger *slog.Logger,
 	communityGroupID int64,
@@ -685,16 +690,16 @@ func (h *Handler) uploadPhoto(ctx context.Context, photos []PhotoSize, tradeID s
 	}
 }
 
-// convertButtons converts internal button types to port types.
-func convertButtons(btns [][]InlineBtn) [][]ports.InlineButton {
+// convertButtons converts guided button types to InlineButton rows.
+func convertButtons(btns [][]InlineBtn) [][]InlineButton {
 	if btns == nil {
 		return nil
 	}
-	rows := make([][]ports.InlineButton, len(btns))
+	rows := make([][]InlineButton, len(btns))
 	for i, row := range btns {
-		rows[i] = make([]ports.InlineButton, len(row))
+		rows[i] = make([]InlineButton, len(row))
 		for j, btn := range row {
-			rows[i][j] = ports.InlineButton{
+			rows[i][j] = InlineButton{
 				Text:         btn.Text,
 				CallbackData: btn.Data,
 			}
@@ -903,7 +908,7 @@ func (h *Handler) cmdReset(ctx context.Context, msg *Message, text string) {
 		h.executeReset(ctx, msg.Chat.ID, msg.MessageThreadID)
 		return
 	}
-	rows := [][]ports.InlineButton{
+	rows := [][]InlineButton{
 		{
 			{Text: "✅ Ya, Reset Semua", CallbackData: "reset:confirm"},
 			{Text: "❌ Batal", CallbackData: "reset:cancel"},

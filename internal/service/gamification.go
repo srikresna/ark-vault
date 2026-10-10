@@ -5,9 +5,7 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
-
 // wib is the Asia/Jakarta timezone used for streak date calculations.
 var wib *time.Location
 
@@ -21,16 +19,16 @@ func init() {
 
 // GamificationService orchestrates XP, levelling and streak logic.
 type GamificationService struct {
-	store   ports.GamificationStore
-	trades  ports.TradeRepository
-	members ports.MemberRepository
+	store   GamificationStore
+	trades  TradeRepository
+	members MemberRepository
 }
 
 // NewGamificationService creates a new GamificationService.
 func NewGamificationService(
-	store ports.GamificationStore,
-	trades ports.TradeRepository,
-	members ports.MemberRepository,
+	store GamificationStore,
+	trades TradeRepository,
+	members MemberRepository,
 ) *GamificationService {
 	return &GamificationService{
 		store:   store,

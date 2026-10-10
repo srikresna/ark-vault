@@ -16,7 +16,6 @@ import (
 	badgerdb "github.com/arkcode369/ark-vault/internal/adapter/badger"
 	"github.com/arkcode369/ark-vault/internal/config"
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 	"github.com/arkcode369/ark-vault/internal/scheduler"
 	"github.com/arkcode369/ark-vault/internal/service"
 )
@@ -45,19 +44,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Notion adapters
-	notionClient := notion.NewClient(cfg.NotionToken)
-	memberRepo := notion.NewMemberRepo(notionClient, cfg.NotionParentID)
-	tradeRepo := notion.NewTradeRepo(notionClient, memberRepo)
-	imageRepo := notion.NewImageRepo(notionClient)
-
-	// BadgerDB for gamification
+	// BadgerDB for gamification & caching
 	store, err := badgerdb.OpenStore(cfg.BadgerDBPath)
 	if err != nil {
 		logger.Error("failed to open badger store", "error", err)
 		os.Exit(1)
 	}
 	defer func() { _ = store.Close() }()
+
+	// Notion adapters (with BadgerDB persistent member index & trade cache)
+	memberCacheRepo := badgerdb.NewMemberCacheRepo(store)
+	tradeCacheRepo := badgerdb.NewTradeCacheRepo(store)
+	notionClient := notion.NewClient(cfg.NotionToken)
+	memberRepo := notion.NewMemberRepo(notionClient, cfg.NotionParentID, memberCacheRepo)
+	tradeRepo := notion.NewTradeRepo(notionClient, memberRepo, tradeCacheRepo)
+	imageRepo := notion.NewImageRepo(notionClient)
 
 	// Services
 	journalSvc := service.NewJournalService(tradeRepo, memberRepo, imageRepo)
@@ -79,7 +80,7 @@ func main() {
 	goalSvc := service.NewGoalService(goalRepo, tradeRepo, gamSvc, badgeSvc)
 
 	// Gemini AI (optional)
-	var aiAnalyzer ports.AIAnalyzer
+	var aiAnalyzer service.AIAnalyzer
 	if cfg.GeminiAPIKey != "" {
 		aiAnalyzer = gemini.NewAnalyzer(cfg.GeminiAPIKey, cfg.GeminiModel)
 		logger.Info("gemini AI analyzer enabled", "model", cfg.GeminiModel)

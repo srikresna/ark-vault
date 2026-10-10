@@ -10,10 +10,18 @@ import (
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
 
-// MemberRepo implements ports.MemberRepository using Notion.
+// MemberCacheStore persists member mappings across bot restarts.
+type MemberCacheStore interface {
+	GetCachedMember(ctx context.Context, telegramID int64) (*domain.Member, error)
+	SaveCachedMember(ctx context.Context, member *domain.Member) error
+	ListCachedMembers(ctx context.Context) ([]domain.Member, error)
+}
+
+// MemberRepo implements service.MemberRepository using Notion + optional persistent cache.
 type MemberRepo struct {
 	client   *Client
 	parentID string // parent page ID for the Trade Journal workspace
+	store    MemberCacheStore
 
 	// In-memory cache: telegramID → Member (to avoid repeated API calls).
 	mu    sync.RWMutex
@@ -21,30 +29,55 @@ type MemberRepo struct {
 }
 
 // NewMemberRepo creates a MemberRepo.
-func NewMemberRepo(client *Client, parentID string) *MemberRepo {
+func NewMemberRepo(client *Client, parentID string, stores ...MemberCacheStore) *MemberRepo {
+	var s MemberCacheStore
+	if len(stores) > 0 {
+		s = stores[0]
+	}
 	return &MemberRepo{
 		client:   client,
 		parentID: parentID,
+		store:    s,
 		cache:    make(map[int64]*domain.Member),
 	}
 }
 
 // EnsureMember creates the member page + inline trade database if it doesn't exist.
 func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domain.Member, error) {
-	// Check cache first
+	// Check in-memory cache first
 	r.mu.RLock()
-	if cached, ok := r.cache[m.TelegramID]; ok {
+	if cached, ok := r.cache[m.TelegramID]; ok && cached.NotionDBID != "" {
 		r.mu.RUnlock()
 		return cached, nil
 	}
 	r.mu.RUnlock()
 
-	// Search Notion for existing page with matching title
+	// Check persistent cache store
+	if r.store != nil {
+		if persisted, err := r.store.GetCachedMember(ctx, m.TelegramID); err == nil && persisted != nil {
+			if persisted.NotionDBID == "" && persisted.NotionPageID != "" {
+				persisted.NotionDBID = r.resolveTradeDBID(ctx, persisted.NotionPageID)
+				_ = r.store.SaveCachedMember(ctx, persisted)
+			}
+			if persisted.NotionDBID != "" {
+				r.mu.Lock()
+				r.cache[m.TelegramID] = persisted
+				r.mu.Unlock()
+				return persisted, nil
+			}
+		}
+	}
+
+	// Search Notion for existing page with matching Telegram ID
 	existing, err := r.findMemberPage(ctx, m.TelegramID)
 	if err == nil && existing != nil {
-		r.mu.Lock()
-		r.cache[m.TelegramID] = existing
-		r.mu.Unlock()
+		if existing.Username == "" {
+			existing.Username = m.Username
+		}
+		if existing.FirstName == "" {
+			existing.FirstName = m.FirstName
+		}
+		r.saveMemberToCache(ctx, existing)
 		return existing, nil
 	}
 
@@ -99,21 +132,38 @@ func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domai
 	}
 	m.NotionDBID = dbID
 
+	r.saveMemberToCache(ctx, m)
+
+	return m, nil
+}
+
+func (r *MemberRepo) saveMemberToCache(ctx context.Context, m *domain.Member) {
 	r.mu.Lock()
 	r.cache[m.TelegramID] = m
 	r.mu.Unlock()
-
-	return m, nil
+	if r.store != nil {
+		_ = r.store.SaveCachedMember(ctx, m)
+	}
 }
 
 // GetMember retrieves a member by Telegram ID.
 func (r *MemberRepo) GetMember(ctx context.Context, telegramID int64) (*domain.Member, error) {
 	r.mu.RLock()
-	if cached, ok := r.cache[telegramID]; ok {
+	if cached, ok := r.cache[telegramID]; ok && cached.NotionDBID != "" {
 		r.mu.RUnlock()
 		return cached, nil
 	}
 	r.mu.RUnlock()
+
+	if r.store != nil {
+		if persisted, err := r.store.GetCachedMember(ctx, telegramID); err == nil && persisted != nil {
+			if persisted.NotionDBID == "" && persisted.NotionPageID != "" {
+				persisted.NotionDBID = r.resolveTradeDBID(ctx, persisted.NotionPageID)
+			}
+			r.saveMemberToCache(ctx, persisted)
+			return persisted, nil
+		}
+	}
 
 	m, err := r.findMemberPage(ctx, telegramID)
 	if err != nil {
@@ -122,14 +172,27 @@ func (r *MemberRepo) GetMember(ctx context.Context, telegramID int64) (*domain.M
 	if m == nil {
 		return nil, fmt.Errorf("member %d not found", telegramID)
 	}
-	r.mu.Lock()
-	r.cache[telegramID] = m
-	r.mu.Unlock()
+	r.saveMemberToCache(ctx, m)
 	return m, nil
 }
 
-// ListMembers returns all cached members. For a full listing, we search Notion.
+// ListMembers returns all known members, warming from the persistent store if the in-memory cache is cold.
 func (r *MemberRepo) ListMembers(ctx context.Context) ([]domain.Member, error) {
+	r.mu.RLock()
+	n := len(r.cache)
+	r.mu.RUnlock()
+
+	if n == 0 && r.store != nil {
+		if persisted, err := r.store.ListCachedMembers(ctx); err == nil && len(persisted) > 0 {
+			r.mu.Lock()
+			for i := range persisted {
+				cp := persisted[i]
+				r.cache[cp.TelegramID] = &cp
+			}
+			r.mu.Unlock()
+		}
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	members := make([]domain.Member, 0, len(r.cache))
@@ -139,7 +202,7 @@ func (r *MemberRepo) ListMembers(ctx context.Context) ([]domain.Member, error) {
 	return members, nil
 }
 
-// findMemberPage searches for a member page by Telegram ID in the callout text.
+// findMemberPage searches for a member page by Telegram ID in the callout text and resolves its trade database ID.
 func (r *MemberRepo) findMemberPage(ctx context.Context, telegramID int64) (*domain.Member, error) {
 	query := fmt.Sprintf("Telegram ID: %d", telegramID)
 	raw, err := r.client.SearchPages(ctx, query)
@@ -161,15 +224,40 @@ func (r *MemberRepo) findMemberPage(ctx context.Context, telegramID int64) (*dom
 		return nil, nil
 	}
 
-	// Use the first match
 	pageID := result.Results[0].ID
+	dbID := r.resolveTradeDBID(ctx, pageID)
 
-	// We need to find the inline database inside this page.
-	// For now, store the page ID; the trade DB ID will be resolved lazily.
 	return &domain.Member{
 		TelegramID:   telegramID,
 		NotionPageID: pageID,
+		NotionDBID:   dbID,
 	}, nil
+}
+
+// resolveTradeDBID inspects child blocks of a member page to find its inline Trades database ID.
+func (r *MemberRepo) resolveTradeDBID(ctx context.Context, pageID string) string {
+	if pageID == "" {
+		return ""
+	}
+	raw, err := r.client.GetBlockChildren(ctx, pageID)
+	if err != nil {
+		return ""
+	}
+	var children struct {
+		Results []struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &children); err != nil {
+		return ""
+	}
+	for _, blk := range children.Results {
+		if blk.Type == "child_database" && blk.ID != "" {
+			return blk.ID
+		}
+	}
+	return ""
 }
 
 // createTradeDatabase creates the inline Notion database for trades.

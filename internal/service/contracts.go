@@ -1,4 +1,4 @@
-package ports
+package service
 
 import (
 	"context"
@@ -6,6 +6,29 @@ import (
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
+
+// TradeRepository defines persistence operations for trades consumed by services.
+type TradeRepository interface {
+	SaveTrade(ctx context.Context, memberID int64, trade *domain.Trade) error
+	GetTrades(ctx context.Context, memberID int64) ([]domain.Trade, error)
+}
+
+// MemberRepository defines persistence operations for members consumed by services.
+type MemberRepository interface {
+	EnsureMember(ctx context.Context, m *domain.Member) (*domain.Member, error)
+	GetMember(ctx context.Context, telegramID int64) (*domain.Member, error)
+	ListMembers(ctx context.Context) ([]domain.Member, error)
+}
+
+// ImageStore handles uploading trade screenshots.
+type ImageStore interface {
+	Upload(ctx context.Context, pageID string, filename string, data []byte) (string, error)
+}
+
+// AIAnalyzer provides AI-powered trade analysis.
+type AIAnalyzer interface {
+	AnalyzeTrades(ctx context.Context, prompt string) (string, error)
+}
 
 // GamificationStore provides storage for gamification data.
 type GamificationStore interface {

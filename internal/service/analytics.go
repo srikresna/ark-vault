@@ -7,18 +7,17 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
 
 // AnalyticsService provides AI-powered trade analytics with caching.
 type AnalyticsService struct {
-	cache  ports.AnalyticsCacheStore
-	ai     ports.AIAnalyzer
-	trades ports.TradeRepository
+	cache  AnalyticsCacheStore
+	ai     AIAnalyzer
+	trades TradeRepository
 }
 
 // NewAnalyticsService creates a new AnalyticsService.
-func NewAnalyticsService(cache ports.AnalyticsCacheStore, ai ports.AIAnalyzer, trades ports.TradeRepository) *AnalyticsService {
+func NewAnalyticsService(cache AnalyticsCacheStore, ai AIAnalyzer, trades TradeRepository) *AnalyticsService {
 	return &AnalyticsService{
 		cache:  cache,
 		ai:     ai,

@@ -6,9 +6,7 @@ import (
 	"sort"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
-
 // LeaderboardEntry represents one member's ranking.
 type LeaderboardEntry struct {
 	Username   string
@@ -21,12 +19,12 @@ type LeaderboardEntry struct {
 
 // LeaderboardService computes community rankings.
 type LeaderboardService struct {
-	trades  ports.TradeRepository
-	members ports.MemberRepository
+	trades  TradeRepository
+	members MemberRepository
 }
 
 // NewLeaderboardService creates a new LeaderboardService.
-func NewLeaderboardService(tr ports.TradeRepository, mr ports.MemberRepository) *LeaderboardService {
+func NewLeaderboardService(tr TradeRepository, mr MemberRepository) *LeaderboardService {
 	return &LeaderboardService{trades: tr, members: mr}
 }
 

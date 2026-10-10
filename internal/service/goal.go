@@ -5,19 +5,18 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
 
 // GoalService manages monthly goals, progress tracking, and goal completion.
 type GoalService struct {
-	store    ports.GoalStore
-	trades   ports.TradeRepository
+	store    GoalStore
+	trades   TradeRepository
 	gamSvc   *GamificationService
 	badgeSvc *BadgeService
 }
 
 // NewGoalService creates a new GoalService.
-func NewGoalService(store ports.GoalStore, trades ports.TradeRepository, gamSvc *GamificationService, badgeSvc *BadgeService) *GoalService {
+func NewGoalService(store GoalStore, trades TradeRepository, gamSvc *GamificationService, badgeSvc *BadgeService) *GoalService {
 	return &GoalService{
 		store:    store,
 		trades:   trades,

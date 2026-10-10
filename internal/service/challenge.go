@@ -7,23 +7,22 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
 
 // ChallengeService manages weekly challenges.
 type ChallengeService struct {
-	store    ports.ChallengeStore
-	trades   ports.TradeRepository
-	members  ports.MemberRepository
+	store    ChallengeStore
+	trades   TradeRepository
+	members  MemberRepository
 	gamSvc   *GamificationService
 	badgeSvc *BadgeService
 }
 
 // NewChallengeService creates a new ChallengeService.
 func NewChallengeService(
-	store ports.ChallengeStore,
-	trades ports.TradeRepository,
-	members ports.MemberRepository,
+	store ChallengeStore,
+	trades TradeRepository,
+	members MemberRepository,
 	gamSvc *GamificationService,
 	badgeSvc *BadgeService,
 ) *ChallengeService {

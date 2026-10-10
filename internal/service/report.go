@@ -6,9 +6,7 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
-
 // WeeklySummary holds aggregated data for a weekly community report.
 type WeeklySummary struct {
 	PeriodStart  time.Time
@@ -23,12 +21,12 @@ type WeeklySummary struct {
 
 // ReportService generates community summary reports.
 type ReportService struct {
-	trades  ports.TradeRepository
-	members ports.MemberRepository
+	trades  TradeRepository
+	members MemberRepository
 }
 
 // NewReportService creates a ReportService.
-func NewReportService(tr ports.TradeRepository, mr ports.MemberRepository) *ReportService {
+func NewReportService(tr TradeRepository, mr MemberRepository) *ReportService {
 	return &ReportService{trades: tr, members: mr}
 }
 

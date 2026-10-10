@@ -8,18 +8,34 @@ import (
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
 
-// TradeRepo implements ports.TradeRepository using Notion.
+// TradeCacheStore caches member trades to avoid repeated Notion database queries.
+type TradeCacheStore interface {
+	GetCachedTrades(ctx context.Context, memberID int64) ([]domain.Trade, bool, error)
+	SaveCachedTrades(ctx context.Context, memberID int64, trades []domain.Trade) error
+	InvalidateCachedTrades(ctx context.Context, memberID int64) error
+}
+
+// TradeRepo implements service.TradeRepository using Notion + optional TTL cache.
 type TradeRepo struct {
-	client    *Client
+	client     *Client
 	memberRepo *MemberRepo
+	cacheStore TradeCacheStore
 }
 
 // NewTradeRepo creates a TradeRepo.
-func NewTradeRepo(client *Client, memberRepo *MemberRepo) *TradeRepo {
-	return &TradeRepo{client: client, memberRepo: memberRepo}
+func NewTradeRepo(client *Client, memberRepo *MemberRepo, caches ...TradeCacheStore) *TradeRepo {
+	var cs TradeCacheStore
+	if len(caches) > 0 {
+		cs = caches[0]
+	}
+	return &TradeRepo{
+		client:     client,
+		memberRepo: memberRepo,
+		cacheStore: cs,
+	}
 }
 
-// SaveTrade creates a new trade entry in the member's inline database.
+// SaveTrade creates a new trade entry in the member's inline database and invalidates their trade cache.
 func (r *TradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain.Trade) error {
 	member, err := r.memberRepo.GetMember(ctx, memberID)
 	if err != nil {
@@ -49,11 +65,21 @@ func (r *TradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain
 		return fmt.Errorf("parse response: %w", err)
 	}
 	trade.ID = resp.ID
+
+	if r.cacheStore != nil {
+		_ = r.cacheStore.InvalidateCachedTrades(ctx, memberID)
+	}
 	return nil
 }
 
-// GetTrades retrieves all trades for a member from their inline database.
+// GetTrades retrieves all trades for a member from cache or their Notion inline database.
 func (r *TradeRepo) GetTrades(ctx context.Context, memberID int64) ([]domain.Trade, error) {
+	if r.cacheStore != nil {
+		if cached, hit, err := r.cacheStore.GetCachedTrades(ctx, memberID); err == nil && hit {
+			return cached, nil
+		}
+	}
+
 	member, err := r.memberRepo.GetMember(ctx, memberID)
 	if err != nil {
 		return nil, fmt.Errorf("get member: %w", err)
@@ -73,7 +99,14 @@ func (r *TradeRepo) GetTrades(ctx context.Context, memberID int64) ([]domain.Tra
 		return nil, fmt.Errorf("query trades: %w", err)
 	}
 
-	return r.parseTrades(raw)
+	trades, err := r.parseTrades(raw)
+	if err != nil {
+		return nil, err
+	}
+	if r.cacheStore != nil {
+		_ = r.cacheStore.SaveCachedTrades(ctx, memberID, trades)
+	}
+	return trades, nil
 }
 
 // buildTradeProperties converts a Trade to Notion page properties.

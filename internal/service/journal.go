@@ -6,18 +6,17 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
 
 // JournalService orchestrates trade recording.
 type JournalService struct {
-	trades  ports.TradeRepository
-	members ports.MemberRepository
-	images  ports.ImageStore
+	trades  TradeRepository
+	members MemberRepository
+	images  ImageStore
 }
 
 // NewJournalService creates a new JournalService.
-func NewJournalService(tr ports.TradeRepository, mr ports.MemberRepository, is ports.ImageStore) *JournalService {
+func NewJournalService(tr TradeRepository, mr MemberRepository, is ImageStore) *JournalService {
 	return &JournalService{trades: tr, members: mr, images: is}
 }
 

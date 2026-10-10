@@ -7,25 +7,24 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
 
 // ReportCardService generates monthly report cards.
 type ReportCardService struct {
-	store  ports.ReportCardStore
-	trades ports.TradeRepository
-	gam    ports.GamificationStore
-	badges ports.BadgeStore
-	ai     ports.AIAnalyzer
+	store  ReportCardStore
+	trades TradeRepository
+	gam    GamificationStore
+	badges BadgeStore
+	ai     AIAnalyzer
 }
 
 // NewReportCardService creates a new ReportCardService.
 func NewReportCardService(
-	store ports.ReportCardStore,
-	trades ports.TradeRepository,
-	gam ports.GamificationStore,
-	badges ports.BadgeStore,
-	ai ports.AIAnalyzer,
+	store ReportCardStore,
+	trades TradeRepository,
+	gam GamificationStore,
+	badges BadgeStore,
+	ai AIAnalyzer,
 ) *ReportCardService {
 	return &ReportCardService{
 		store:  store,

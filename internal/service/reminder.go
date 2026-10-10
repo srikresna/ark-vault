@@ -7,18 +7,17 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
 
 // ReminderService manages daily reminder preferences and due-reminder queries.
 type ReminderService struct {
-	store   ports.ReminderStore
-	streaks ports.GamificationStore
+	store   ReminderStore
+	streaks GamificationStore
 	logger  *slog.Logger
 }
 
 // NewReminderService creates a new ReminderService.
-func NewReminderService(store ports.ReminderStore, streaks ports.GamificationStore, logger *slog.Logger) *ReminderService {
+func NewReminderService(store ReminderStore, streaks GamificationStore, logger *slog.Logger) *ReminderService {
 	return &ReminderService{
 		store:   store,
 		streaks: streaks,

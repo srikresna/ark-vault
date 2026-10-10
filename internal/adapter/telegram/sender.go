@@ -9,11 +9,15 @@ import (
 	"mime/multipart"
 	"net/http"
 	"time"
-
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
 
-// Sender implements ports.Messenger for Telegram.
+// InlineButton is a single button in a Telegram inline keyboard.
+type InlineButton struct {
+	Text         string
+	CallbackData string
+}
+
+// Sender sends messages and files to the Telegram Bot API.
 type Sender struct {
 	token   string
 	baseAPI string
@@ -139,7 +143,7 @@ func (s *Sender) SendHTMLToThread(ctx context.Context, chatID int64, threadID in
 }
 
 // SendWithKeyboard sends a message with inline keyboard.
-func (s *Sender) SendWithKeyboard(ctx context.Context, chatID int64, text string, rows [][]ports.InlineButton, threadID ...int) (int, error) {
+func (s *Sender) SendWithKeyboard(ctx context.Context, chatID int64, text string, rows [][]InlineButton, threadID ...int) (int, error) {
 	payload := map[string]interface{}{
 		"chat_id":      chatID,
 		"text":         text,
@@ -168,7 +172,7 @@ func (s *Sender) EditMessage(ctx context.Context, chatID int64, msgID int, text 
 }
 
 // EditWithKeyboard edits text and keyboard.
-func (s *Sender) EditWithKeyboard(ctx context.Context, chatID int64, msgID int, text string, rows [][]ports.InlineButton) error {
+func (s *Sender) EditWithKeyboard(ctx context.Context, chatID int64, msgID int, text string, rows [][]InlineButton) error {
 	_, err := s.call(ctx, "editMessageText", map[string]interface{}{
 		"chat_id":      chatID,
 		"message_id":   msgID,
@@ -247,7 +251,7 @@ func (s *Sender) SendDocument(ctx context.Context, chatID int64, filename string
 	return nil
 }
 
-func buildKeyboard(rows [][]ports.InlineButton) map[string]interface{} {
+func buildKeyboard(rows [][]InlineButton) map[string]interface{} {
 	tgRows := make([][]map[string]interface{}, len(rows))
 	for i, row := range rows {
 		tgRows[i] = make([]map[string]interface{}, len(row))

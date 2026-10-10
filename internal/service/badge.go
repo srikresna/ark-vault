@@ -6,18 +6,17 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/ports"
 )
 
 // BadgeService checks badge conditions and awards badges.
 type BadgeService struct {
-	store  ports.BadgeStore
-	trades ports.TradeRepository
+	store  BadgeStore
+	trades TradeRepository
 	gamSvc *GamificationService
 }
 
 // NewBadgeService creates a new BadgeService.
-func NewBadgeService(store ports.BadgeStore, trades ports.TradeRepository, gamSvc *GamificationService) *BadgeService {
+func NewBadgeService(store BadgeStore, trades TradeRepository, gamSvc *GamificationService) *BadgeService {
 	return &BadgeService{
 		store:  store,
 		trades: trades,
