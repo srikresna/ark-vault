@@ -1,5 +1,10 @@
 volumes:
   vault-data:
+networks:
+  default:
+  monitoring:
+    name: grafana_monitoring-net
+    external: true
 
 services:
   bot:
@@ -25,6 +30,9 @@ services:
       - "9102:9102"
     volumes:
       - vault-data:/data/badger
+    networks:
+      - default
+      - monitoring
     deploy:
       resources:
         limits:
