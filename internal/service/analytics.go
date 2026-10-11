@@ -65,8 +65,8 @@ func (s *AnalyticsService) GetAnalytics(ctx context.Context, telegramID int64) (
 		winRate = float64(wins) / float64(closed) * 100
 	}
 	avgRR := 0.0
-	if total > 0 {
-		avgRR = totalRR / float64(total)
+	if closed > 0 {
+		avgRR = totalRR / float64(closed)
 	}
 
 	// Build prompt for AI
@@ -111,7 +111,7 @@ func buildAnalyticsPrompt(trades []domain.Trade, total, wins, losses, breakEvens
 	}
 
 	sb.WriteString("Data trade terbaru:\n")
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		t := trades[i]
 		fmt.Fprintf(&sb, "- %s %s %s %s RR:%+.1f Session:%s\n",
 			t.Date.Format("2006-01-02"),

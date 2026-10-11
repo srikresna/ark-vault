@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
@@ -96,17 +97,12 @@ func (s *ReportService) GenerateWeeklySummary(ctx context.Context, weekStart, we
 	}
 
 	// Top 3 by RR
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].TotalRR > entries[j].TotalRR
+	})
 	topN := 3
 	if len(entries) < topN {
 		topN = len(entries)
-	}
-	// Simple sort by RR
-	for i := 0; i < topN; i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].TotalRR > entries[i].TotalRR {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
 	}
 	summary.TopPerformers = entries[:topN]
 

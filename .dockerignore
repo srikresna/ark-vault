@@ -1,0 +1,11 @@
+.git
+.gitignore
+.github
+.env
+.env.*
+*.md
+*_test.go
+coverage.out
+coverage.html
+.idea
+.vscode

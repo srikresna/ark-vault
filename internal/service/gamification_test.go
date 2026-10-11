@@ -241,3 +241,150 @@ func TestGamificationService_AdjustXPForTradeChange(t *testing.T) {
 		t.Errorf("expected delta=-20 and TotalXP=5 after deleting trade, got delta=%d TotalXP=%d", delta, prof.TotalXP)
 	}
 }
+
+type mockReportCardStore struct {
+	cards map[string]*domain.MonthlyReportCard
+}
+
+func (m *mockReportCardStore) GetReportCard(_ context.Context, telegramID int64, yearMonth string) (*domain.MonthlyReportCard, error) {
+	if m.cards == nil {
+		return nil, nil
+	}
+	return m.cards[yearMonth], nil
+}
+
+func (m *mockReportCardStore) SaveReportCard(_ context.Context, report *domain.MonthlyReportCard) error {
+	if m.cards == nil {
+		m.cards = make(map[string]*domain.MonthlyReportCard)
+	}
+	cp := *report
+	m.cards[report.YearMonth] = &cp
+	return nil
+}
+
+type mockAnalyticsCacheStore struct {
+	cached *domain.TradeAnalytics
+}
+
+func (m *mockAnalyticsCacheStore) GetAnalyticsCache(_ context.Context, _ int64) (*domain.TradeAnalytics, error) {
+	return m.cached, nil
+}
+
+func (m *mockAnalyticsCacheStore) SaveAnalyticsCache(_ context.Context, a *domain.TradeAnalytics) error {
+	cp := *a
+	m.cached = &cp
+	return nil
+}
+
+type mockAIAnalyzer struct {
+	calls int
+}
+
+func (m *mockAIAnalyzer) AnalyzeTrades(_ context.Context, _ string) (string, error) {
+	m.calls++
+	return "[KEKUATAN]\nGood\n[KELEMAHAN]\nNone\n[POLA]\nLondon\n[REKOMENDASI]\nHold\n[PENILAIAN]\nSolid", nil
+}
+
+func TestReportCardService_InvalidatesCacheOnTradeChange(t *testing.T) {
+	rcStore := &mockReportCardStore{}
+	tradesRepo := newMockGamificationTradeRepo()
+	gamStore := newMockGamificationStore()
+	badgeStore := newMockBadgeStore()
+	ai := &mockAIAnalyzer{}
+	svc := NewReportCardService(rcStore, tradesRepo, gamStore, badgeStore, ai)
+
+	ctx := context.Background()
+	uid := int64(55)
+	dt := time.Date(2026, 3, 15, 10, 0, 0, 0, wib)
+	tradesRepo.trades[uid] = []domain.Trade{
+		{ID: "1", Date: dt, Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 2.0},
+	}
+
+	rc1, err := svc.GenerateMonthlyReport(ctx, uid, "2026-03")
+	if err != nil {
+		t.Fatalf("first GenerateMonthlyReport failed: %v", err)
+	}
+	if rc1.TotalTrades != 1 || ai.calls != 1 {
+		t.Fatalf("expected 1 trade and 1 AI call, got trades=%d calls=%d", rc1.TotalTrades, ai.calls)
+	}
+
+	// Unchanged trades -> returns cached report without calling AI again
+	_, err = svc.GenerateMonthlyReport(ctx, uid, "2026-03")
+	if err != nil {
+		t.Fatalf("second GenerateMonthlyReport failed: %v", err)
+	}
+	if ai.calls != 1 {
+		t.Fatalf("expected cached report without extra AI call, got calls=%d", ai.calls)
+	}
+
+	// Add a new trade in the same month -> cache invalidated and regenerated
+	tradesRepo.trades[uid] = append(tradesRepo.trades[uid], domain.Trade{
+		ID: "2", Date: dt.Add(time.Hour), Symbol: "EURUSD", Status: domain.StatusLoss, ResultRR: -1.0,
+	})
+	rc2, err := svc.GenerateMonthlyReport(ctx, uid, "2026-03")
+	if err != nil {
+		t.Fatalf("third GenerateMonthlyReport failed: %v", err)
+	}
+	if rc2.TotalTrades != 2 || rc2.TotalRR != 1.0 || ai.calls != 2 {
+		t.Fatalf("expected regenerated report with 2 trades, +1.0R, 2 AI calls; got %+v calls=%d", rc2, ai.calls)
+	}
+}
+
+func TestLeaderboardService_MinTradesExcludesOpenTrades(t *testing.T) {
+	tradesRepo := newMockGamificationTradeRepo()
+	membersRepo := newMockGamificationMemberRepo()
+	ctx := context.Background()
+	now := time.Now().In(wib)
+
+	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 1, Username: "openonly"})
+	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 2, Username: "closedtrader"})
+
+	// Member 1 has 2 closed trades + 2 open trades (only 2 closed < minTrades=3)
+	tradesRepo.trades[1] = []domain.Trade{
+		{Date: now, Status: domain.StatusWin, ResultRR: 2.0},
+		{Date: now, Status: domain.StatusWin, ResultRR: 2.0},
+		{Date: now, Status: domain.StatusOpen},
+		{Date: now, Status: domain.StatusOpen},
+	}
+	// Member 2 has 3 closed trades (>= minTrades=3)
+	tradesRepo.trades[2] = []domain.Trade{
+		{Date: now, Status: domain.StatusWin, ResultRR: 1.5},
+		{Date: now, Status: domain.StatusWin, ResultRR: 1.5},
+		{Date: now, Status: domain.StatusLoss, ResultRR: -1.0},
+	}
+
+	svc := NewLeaderboardService(tradesRepo, membersRepo)
+	entries, err := svc.GetLeaderboardByPeriod(ctx, "rr", "all", 10, 3)
+	if err != nil {
+		t.Fatalf("GetLeaderboardByPeriod failed: %v", err)
+	}
+	if len(entries) != 1 || entries[0].TelegramID != 2 || entries[0].TotalTrades != 3 {
+		t.Fatalf("expected only member 2 with 3 closed trades, got %+v", entries)
+	}
+}
+
+func TestAnalyticsService_AvgRRExcludesOpenTrades(t *testing.T) {
+	cacheStore := &mockAnalyticsCacheStore{}
+	tradesRepo := newMockGamificationTradeRepo()
+	ai := &mockAIAnalyzer{}
+	ctx := context.Background()
+	uid := int64(88)
+	now := time.Now().In(wib)
+
+	tradesRepo.trades[uid] = []domain.Trade{
+		{Date: now, Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 3.0},
+		{Date: now, Symbol: "XAUUSD", Status: domain.StatusLoss, ResultRR: -1.0},
+		{Date: now, Symbol: "EURUSD", Status: domain.StatusOpen, ResultRR: 0},
+		{Date: now, Symbol: "GBPUSD", Status: domain.StatusOpen, ResultRR: 0},
+	}
+
+	svc := NewAnalyticsService(cacheStore, ai, tradesRepo)
+	res, err := svc.GetAnalytics(ctx, uid)
+	if err != nil {
+		t.Fatalf("GetAnalytics failed: %v", err)
+	}
+	// 2 closed trades with totalRR = +2.0 -> avgRR should be 1.0, not 0.5
+	if res.AvgRR != 1.0 {
+		t.Fatalf("expected AvgRR = 1.0 over 2 closed trades, got %v", res.AvgRR)
+	}
+}

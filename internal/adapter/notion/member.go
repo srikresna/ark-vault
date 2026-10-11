@@ -47,8 +47,9 @@ func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domai
 	// Check in-memory cache first
 	r.mu.RLock()
 	if cached, ok := r.cache[m.TelegramID]; ok && cached.NotionDBID != "" {
+		cp := *cached
 		r.mu.RUnlock()
-		return cached, nil
+		return &cp, nil
 	}
 	r.mu.RUnlock()
 
@@ -60,8 +61,9 @@ func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domai
 				_ = r.store.SaveCachedMember(ctx, persisted)
 			}
 			if persisted.NotionDBID != "" {
+				cp := *persisted
 				r.mu.Lock()
-				r.cache[m.TelegramID] = persisted
+				r.cache[m.TelegramID] = &cp
 				r.mu.Unlock()
 				return persisted, nil
 			}
@@ -138,11 +140,12 @@ func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domai
 }
 
 func (r *MemberRepo) saveMemberToCache(ctx context.Context, m *domain.Member) {
+	cp := *m
 	r.mu.Lock()
-	r.cache[m.TelegramID] = m
+	r.cache[m.TelegramID] = &cp
 	r.mu.Unlock()
 	if r.store != nil {
-		_ = r.store.SaveCachedMember(ctx, m)
+		_ = r.store.SaveCachedMember(ctx, &cp)
 	}
 }
 
@@ -150,8 +153,9 @@ func (r *MemberRepo) saveMemberToCache(ctx context.Context, m *domain.Member) {
 func (r *MemberRepo) GetMember(ctx context.Context, telegramID int64) (*domain.Member, error) {
 	r.mu.RLock()
 	if cached, ok := r.cache[telegramID]; ok && cached.NotionDBID != "" {
+		cp := *cached
 		r.mu.RUnlock()
-		return cached, nil
+		return &cp, nil
 	}
 	r.mu.RUnlock()
 

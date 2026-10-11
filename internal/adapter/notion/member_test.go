@@ -107,3 +107,28 @@ func TestMemberRepo_FindMemberPage_ResolvesInlineDBID(t *testing.T) {
 		t.Fatalf("expected NotionPageID=page-existing and NotionDBID=db-resolved-999, got %+v", m)
 	}
 }
+
+func TestMemberRepo_DefensiveCopy(t *testing.T) {
+	repo := NewMemberRepo(NewClient("token"), "parent-1")
+	orig := &domain.Member{
+		TelegramID:   3003,
+		Username:     "original",
+		NotionPageID: "p-3",
+		NotionDBID:   "db-3",
+	}
+	repo.saveMemberToCache(context.Background(), orig)
+
+	got, err := repo.GetMember(context.Background(), 3003)
+	if err != nil {
+		t.Fatalf("GetMember failed: %v", err)
+	}
+	got.Username = "mutated"
+
+	got2, err := repo.GetMember(context.Background(), 3003)
+	if err != nil {
+		t.Fatalf("second GetMember failed: %v", err)
+	}
+	if got2.Username != "original" {
+		t.Fatalf("expected cached member username to remain 'original', got %q", got2.Username)
+	}
+}

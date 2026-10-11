@@ -51,7 +51,8 @@ func (s *LeaderboardService) GetLeaderboardByPeriod(ctx context.Context, metric,
 		}
 		filtered := domain.FilterTradesByPeriod(trades, period, now)
 		stats := domain.CalculateStats(filtered)
-		if stats.TotalTrades < minTrades {
+		closedTrades := stats.Wins + stats.Losses + stats.BreakEvens
+		if closedTrades < minTrades {
 			continue
 		}
 		entries = append(entries, LeaderboardEntry{
@@ -60,7 +61,7 @@ func (s *LeaderboardService) GetLeaderboardByPeriod(ctx context.Context, metric,
 			TelegramID:  m.TelegramID,
 			WinRate:     stats.WinRate,
 			TotalRR:     stats.TotalRR,
-			TotalTrades: stats.TotalTrades,
+			TotalTrades: closedTrades,
 		})
 	}
 

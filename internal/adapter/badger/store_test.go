@@ -1,0 +1,540 @@
+package badger
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/arkcode369/ark-vault/internal/domain"
+)
+
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to open test badger store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	return store
+}
+
+func TestGamificationRepo(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewGamificationRepo(store)
+	ctx := context.Background()
+
+	// Get non-existent profile
+	p, err := repo.GetProfile(ctx, 999)
+	if err != nil {
+		t.Fatalf("unexpected error getting missing profile: %v", err)
+	}
+	if p != nil {
+		t.Fatalf("expected nil profile, got %+v", p)
+	}
+
+	// Save and Get profile
+	now := time.Now().Truncate(time.Second)
+	profile := &domain.GamificationProfile{
+		TelegramID: 12345,
+		TotalXP:    350,
+		Level:      3,
+		Title:      "Apprentice",
+		UpdatedAt:  now,
+	}
+	if err := repo.SaveProfile(ctx, profile); err != nil {
+		t.Fatalf("failed to save profile: %v", err)
+	}
+
+	gotProfile, err := repo.GetProfile(ctx, 12345)
+	if err != nil {
+		t.Fatalf("failed to get profile: %v", err)
+	}
+	if gotProfile == nil || gotProfile.TotalXP != 350 || gotProfile.Level != 3 || gotProfile.Title != "Apprentice" {
+		t.Fatalf("unexpected profile fetched: %+v", gotProfile)
+	}
+
+	// Get non-existent streak
+	s, err := repo.GetStreak(ctx, 999)
+	if err != nil {
+		t.Fatalf("unexpected error getting missing streak: %v", err)
+	}
+	if s != nil {
+		t.Fatalf("expected nil streak, got %+v", s)
+	}
+
+	// Save and Get streak
+	streak := &domain.StreakData{
+		TelegramID:    12345,
+		CurrentStreak: 5,
+		LongestStreak: 12,
+		LastLogDate:   "2026-10-11",
+		UpdatedAt:     now,
+	}
+	if err := repo.SaveStreak(ctx, streak); err != nil {
+		t.Fatalf("failed to save streak: %v", err)
+	}
+
+	gotStreak, err := repo.GetStreak(ctx, 12345)
+	if err != nil {
+		t.Fatalf("failed to get streak: %v", err)
+	}
+	if gotStreak == nil || gotStreak.CurrentStreak != 5 || gotStreak.LongestStreak != 12 || gotStreak.LastLogDate != "2026-10-11" {
+		t.Fatalf("unexpected streak fetched: %+v", gotStreak)
+	}
+
+	// Append and Get XP Events
+	ev1 := &domain.XPEvent{
+		TelegramID: 12345,
+		Amount:     50,
+		Reason:     "trade logged",
+		Timestamp:  now.Add(-10 * time.Minute),
+	}
+	ev2 := &domain.XPEvent{
+		TelegramID: 12345,
+		Amount:     25,
+		Reason:     "streak bonus",
+		Timestamp:  now,
+	}
+	if err := repo.AppendXPEvent(ctx, ev1); err != nil {
+		t.Fatalf("failed to append ev1: %v", err)
+	}
+	if err := repo.AppendXPEvent(ctx, ev2); err != nil {
+		t.Fatalf("failed to append ev2: %v", err)
+	}
+
+	events, err := repo.GetXPEvents(ctx, 12345, now.Add(-15*time.Minute))
+	if err != nil {
+		t.Fatalf("failed to get xp events: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 xp events, got %d", len(events))
+	}
+
+	// Filter since time after ev1
+	eventsAfter, err := repo.GetXPEvents(ctx, 12345, now.Add(-5*time.Minute))
+	if err != nil {
+		t.Fatalf("failed to get xp events after cutoff: %v", err)
+	}
+	if len(eventsAfter) != 1 {
+		t.Fatalf("expected 1 xp event after cutoff, got %d", len(eventsAfter))
+	}
+}
+
+func TestBadgeRepo(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewBadgeRepo(store)
+	ctx := context.Background()
+
+	// Initial checks
+	has, err := repo.HasBadge(ctx, 100, domain.BadgeFirstTrade)
+	if err != nil {
+		t.Fatalf("unexpected error on HasBadge: %v", err)
+	}
+	if has {
+		t.Fatal("expected HasBadge to be false initially")
+	}
+
+	badges, err := repo.GetBadges(ctx, 100)
+	if err != nil {
+		t.Fatalf("unexpected error on GetBadges: %v", err)
+	}
+	if len(badges) != 0 {
+		t.Fatalf("expected 0 badges, got %d", len(badges))
+	}
+
+	// Award badge
+	award := &domain.BadgeAward{
+		TelegramID: 100,
+		BadgeID:    domain.BadgeFirstTrade,
+		AwardedAt:  time.Now().Truncate(time.Second),
+	}
+	if err := repo.AwardBadge(ctx, award); err != nil {
+		t.Fatalf("failed to award badge: %v", err)
+	}
+
+	has, err = repo.HasBadge(ctx, 100, domain.BadgeFirstTrade)
+	if err != nil {
+		t.Fatalf("unexpected error on HasBadge: %v", err)
+	}
+	if !has {
+		t.Fatal("expected HasBadge to be true after awarding")
+	}
+
+	badges, err = repo.GetBadges(ctx, 100)
+	if err != nil {
+		t.Fatalf("unexpected error on GetBadges: %v", err)
+	}
+	if len(badges) != 1 || badges[0].BadgeID != domain.BadgeFirstTrade {
+		t.Fatalf("unexpected badges list: %+v", badges)
+	}
+}
+
+func TestChallengeRepo(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewChallengeRepo(store)
+	ctx := context.Background()
+
+	// Non-existent challenge
+	ch, err := repo.GetChallenge(ctx, "2026-W41")
+	if err != nil {
+		t.Fatalf("unexpected error on GetChallenge: %v", err)
+	}
+	if ch != nil {
+		t.Fatalf("expected nil challenge, got %+v", ch)
+	}
+
+	// Save and Get challenge
+	now := time.Now().Truncate(time.Second)
+	challenge := &domain.WeeklyChallenge{
+		YearWeek:    "2026-W41",
+		Type:        domain.ChallengeMostTrades,
+		Title:       "Trade Warrior",
+		Description: "Most trades logged this week",
+		StartDate:   now,
+		EndDate:     now.Add(7 * 24 * time.Hour),
+		Finalized:   false,
+	}
+	if err := repo.SaveChallenge(ctx, challenge); err != nil {
+		t.Fatalf("failed to save challenge: %v", err)
+	}
+
+	gotChallenge, err := repo.GetChallenge(ctx, "2026-W41")
+	if err != nil {
+		t.Fatalf("failed to get challenge: %v", err)
+	}
+	if gotChallenge == nil || gotChallenge.YearWeek != "2026-W41" || gotChallenge.Title != "Trade Warrior" {
+		t.Fatalf("unexpected challenge fetched: %+v", gotChallenge)
+	}
+
+	// Challenge entry
+	entry := &domain.ChallengeEntry{
+		YearWeek:   "2026-W41",
+		TelegramID: 100,
+		Username:   "trader1",
+		Value:      15,
+	}
+	if err := repo.SaveChallengeEntry(ctx, entry); err != nil {
+		t.Fatalf("failed to save challenge entry: %v", err)
+	}
+
+	gotEntry, err := repo.GetChallengeEntry(ctx, "2026-W41", 100)
+	if err != nil {
+		t.Fatalf("failed to get challenge entry: %v", err)
+	}
+	if gotEntry == nil || gotEntry.Value != 15 {
+		t.Fatalf("unexpected challenge entry: %+v", gotEntry)
+	}
+
+	entries, err := repo.GetChallengeEntries(ctx, "2026-W41")
+	if err != nil {
+		t.Fatalf("failed to get challenge entries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+}
+
+func TestGoalRepo(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewGoalRepo(store)
+	ctx := context.Background()
+
+	// Non-existent goal
+	g, err := repo.GetGoal(ctx, 100, "2026-10")
+	if err != nil {
+		t.Fatalf("unexpected error getting missing goal: %v", err)
+	}
+	if g != nil {
+		t.Fatalf("expected nil goal, got %+v", g)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	goalActive := &domain.MonthlyGoal{
+		TelegramID:  100,
+		YearMonth:   "2026-10",
+		GoalType:    domain.GoalTotalTrades,
+		TargetValue: 30,
+		Achieved:    false,
+		CreatedAt:   now,
+	}
+	goalAchieved := &domain.MonthlyGoal{
+		TelegramID:  200,
+		YearMonth:   "2026-10",
+		GoalType:    domain.GoalTotalRR,
+		TargetValue: 10,
+		Achieved:    true,
+		CreatedAt:   now,
+	}
+	goalOtherMonth := &domain.MonthlyGoal{
+		TelegramID:  300,
+		YearMonth:   "2026-11",
+		GoalType:    domain.GoalWinRate,
+		TargetValue: 60,
+		Achieved:    false,
+		CreatedAt:   now,
+	}
+
+	if err := repo.SaveGoal(ctx, goalActive); err != nil {
+		t.Fatalf("failed to save goalActive: %v", err)
+	}
+	if err := repo.SaveGoal(ctx, goalAchieved); err != nil {
+		t.Fatalf("failed to save goalAchieved: %v", err)
+	}
+	if err := repo.SaveGoal(ctx, goalOtherMonth); err != nil {
+		t.Fatalf("failed to save goalOtherMonth: %v", err)
+	}
+
+	gotGoal, err := repo.GetGoal(ctx, 100, "2026-10")
+	if err != nil {
+		t.Fatalf("failed to get goal: %v", err)
+	}
+	if gotGoal == nil || gotGoal.TargetValue != 30 || gotGoal.Achieved {
+		t.Fatalf("unexpected goal fetched: %+v", gotGoal)
+	}
+
+	activeGoals, err := repo.ListActiveGoals(ctx, "2026-10")
+	if err != nil {
+		t.Fatalf("failed to list active goals: %v", err)
+	}
+	if len(activeGoals) != 1 || activeGoals[0].TelegramID != 100 {
+		t.Fatalf("expected exactly 1 active goal for 2026-10 (id 100), got %+v", activeGoals)
+	}
+}
+
+func TestReminderRepo(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewReminderRepo(store)
+	ctx := context.Background()
+
+	// Non-existent pref
+	pref, err := repo.GetReminderPref(ctx, 100)
+	if err != nil {
+		t.Fatalf("unexpected error getting reminder pref: %v", err)
+	}
+	if pref != nil {
+		t.Fatalf("expected nil reminder pref, got %+v", pref)
+	}
+
+	prefEnabled := &domain.ReminderPreference{
+		TelegramID:  100,
+		Enabled:     true,
+		Hour:        20,
+		ChatID:      12345,
+		ThreadID:    1,
+		IsCommunity: false,
+	}
+	prefDisabled := &domain.ReminderPreference{
+		TelegramID:  200,
+		Enabled:     false,
+		Hour:        18,
+		ChatID:      67890,
+		ThreadID:    0,
+		IsCommunity: true,
+	}
+
+	if err := repo.SaveReminderPref(ctx, prefEnabled); err != nil {
+		t.Fatalf("failed to save prefEnabled: %v", err)
+	}
+	if err := repo.SaveReminderPref(ctx, prefDisabled); err != nil {
+		t.Fatalf("failed to save prefDisabled: %v", err)
+	}
+
+	gotPref, err := repo.GetReminderPref(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get pref: %v", err)
+	}
+	if gotPref == nil || !gotPref.Enabled || gotPref.Hour != 20 || gotPref.ChatID != 12345 {
+		t.Fatalf("unexpected pref fetched: %+v", gotPref)
+	}
+
+	enabledList, err := repo.ListEnabledReminders(ctx)
+	if err != nil {
+		t.Fatalf("failed to list enabled reminders: %v", err)
+	}
+	if len(enabledList) != 1 || enabledList[0].TelegramID != 100 {
+		t.Fatalf("expected exactly 1 enabled reminder (id 100), got %+v", enabledList)
+	}
+}
+
+func TestMemberCacheRepo(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewMemberCacheRepo(store)
+	ctx := context.Background()
+
+	// Non-existent member
+	m, err := repo.GetCachedMember(ctx, 100)
+	if err != nil {
+		t.Fatalf("unexpected error getting member: %v", err)
+	}
+	if m != nil {
+		t.Fatalf("expected nil member, got %+v", m)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	member1 := &domain.Member{
+		TelegramID:   100,
+		Username:     "alice",
+		FirstName:    "Alice",
+		JoinDate:     now,
+		NotionPageID: "page-alice",
+		NotionDBID:   "db-alice",
+	}
+	member2 := &domain.Member{
+		TelegramID:   200,
+		Username:     "bob",
+		FirstName:    "Bob",
+		JoinDate:     now,
+		NotionPageID: "page-bob",
+		NotionDBID:   "db-bob",
+	}
+
+	if err := repo.SaveCachedMember(ctx, member1); err != nil {
+		t.Fatalf("failed to save member1: %v", err)
+	}
+	if err := repo.SaveCachedMember(ctx, member2); err != nil {
+		t.Fatalf("failed to save member2: %v", err)
+	}
+
+	gotMember, err := repo.GetCachedMember(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get member: %v", err)
+	}
+	if gotMember == nil || gotMember.Username != "alice" || gotMember.NotionPageID != "page-alice" {
+		t.Fatalf("unexpected member fetched: %+v", gotMember)
+	}
+
+	allMembers, err := repo.ListCachedMembers(ctx)
+	if err != nil {
+		t.Fatalf("failed to list members: %v", err)
+	}
+	if len(allMembers) != 2 {
+		t.Fatalf("expected 2 cached members, got %d", len(allMembers))
+	}
+}
+
+func TestTradeCacheRepo(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewTradeCacheRepo(store)
+	ctx := context.Background()
+
+	// Non-existent trade cache
+	trades, found, err := repo.GetCachedTrades(ctx, 100)
+	if err != nil {
+		t.Fatalf("unexpected error getting cached trades: %v", err)
+	}
+	if found || trades != nil {
+		t.Fatalf("expected not found, got found=%v trades=%+v", found, trades)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	sampleTrades := []domain.Trade{
+		{
+			ID:         "trade-1",
+			MemberID:   100,
+			Date:       now,
+			AssetType:  domain.AssetForex,
+			Symbol:     "EURUSD",
+			Direction:  domain.DirBuy,
+			ResultRR:   2.5,
+			Status:     domain.StatusWin,
+			TimeWindow: domain.SessionLondon,
+		},
+		{
+			ID:         "trade-2",
+			MemberID:   100,
+			Date:       now,
+			AssetType:  domain.AssetCrypto,
+			Symbol:     "BTCUSDT",
+			Direction:  domain.DirSell,
+			ResultRR:   -1.0,
+			Status:     domain.StatusLoss,
+			TimeWindow: domain.SessionNYAM,
+		},
+	}
+
+	if err := repo.SaveCachedTrades(ctx, 100, sampleTrades); err != nil {
+		t.Fatalf("failed to save cached trades: %v", err)
+	}
+
+	gotTrades, found, err := repo.GetCachedTrades(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get cached trades: %v", err)
+	}
+	if !found {
+		t.Fatal("expected trades to be found in cache")
+	}
+	if len(gotTrades) != 2 || gotTrades[0].Symbol != "EURUSD" || gotTrades[1].Symbol != "BTCUSDT" {
+		t.Fatalf("unexpected cached trades: %+v", gotTrades)
+	}
+
+	// Invalidate cache
+	if err := repo.InvalidateCachedTrades(ctx, 100); err != nil {
+		t.Fatalf("failed to invalidate cached trades: %v", err)
+	}
+
+	afterTrades, foundAfter, err := repo.GetCachedTrades(ctx, 100)
+	if err != nil {
+		t.Fatalf("unexpected error getting invalidated trades: %v", err)
+	}
+	if foundAfter || afterTrades != nil {
+		t.Fatalf("expected cache to be invalidated, got found=%v trades=%+v", foundAfter, afterTrades)
+	}
+}
+
+func TestStore_Reset(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	gamRepo := NewGamificationRepo(store)
+	memberRepo := NewMemberCacheRepo(store)
+	goalRepo := NewGoalRepo(store)
+
+	now := time.Now().Truncate(time.Second)
+	if err := gamRepo.SaveProfile(ctx, &domain.GamificationProfile{TelegramID: 555, TotalXP: 100}); err != nil {
+		t.Fatalf("failed to save profile: %v", err)
+	}
+	if err := memberRepo.SaveCachedMember(ctx, &domain.Member{TelegramID: 555, Username: "reset_user"}); err != nil {
+		t.Fatalf("failed to save member: %v", err)
+	}
+	if err := goalRepo.SaveGoal(ctx, &domain.MonthlyGoal{TelegramID: 555, YearMonth: "2026-10", TargetValue: 5, CreatedAt: now}); err != nil {
+		t.Fatalf("failed to save goal: %v", err)
+	}
+
+	// Verify entries exist before reset
+	p, err := gamRepo.GetProfile(ctx, 555)
+	if err != nil || p == nil {
+		t.Fatalf("expected profile to exist before reset: %v", err)
+	}
+
+	// Perform Reset
+	if err := store.Reset(); err != nil {
+		t.Fatalf("store.Reset failed: %v", err)
+	}
+
+	// Verify entries are wiped
+	pAfter, err := gamRepo.GetProfile(ctx, 555)
+	if err != nil {
+		t.Fatalf("unexpected error getting profile after reset: %v", err)
+	}
+	if pAfter != nil {
+		t.Fatalf("expected nil profile after reset, got %+v", pAfter)
+	}
+
+	mAfter, err := memberRepo.GetCachedMember(ctx, 555)
+	if err != nil {
+		t.Fatalf("unexpected error getting member after reset: %v", err)
+	}
+	if mAfter != nil {
+		t.Fatalf("expected nil member after reset, got %+v", mAfter)
+	}
+
+	activeGoals, err := goalRepo.ListActiveGoals(ctx, "2026-10")
+	if err != nil {
+		t.Fatalf("unexpected error listing goals after reset: %v", err)
+	}
+	if len(activeGoals) != 0 {
+		t.Fatalf("expected 0 goals after reset, got %d", len(activeGoals))
+	}
+}

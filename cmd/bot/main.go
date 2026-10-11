@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,18 +32,29 @@ func init() {
 }
 
 func main() {
-	// Logger
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
-
 	// Config
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Error("failed to load config", "error", err)
+		slog.New(slog.NewJSONHandler(os.Stdout, nil)).Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	// Logger
+	var logLevel slog.Level
+	switch strings.ToLower(cfg.LogLevel) {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
+	slog.SetDefault(logger)
 
 	// BadgerDB for gamification & caching
 	store, err := badgerdb.OpenStore(cfg.BadgerDBPath)
@@ -120,6 +132,7 @@ func main() {
 		sender, svc, exp, tradeRepo, memberRepo, limiter, logger,
 		cfg.CommunityGroupID, cfg.OwnerID,
 	)
+	defer handler.Close()
 	bot := telegram.NewBot(cfg.TelegramToken, handler, logger)
 	handler.SetBot(bot)
 	handler.SetResetter(store)

@@ -78,6 +78,7 @@ type Handler struct {
 	logger           *slog.Logger
 	communityGroupID int64
 	ownerID          int64
+	unauthMu         sync.Mutex
 	unauthNotified   map[int64]time.Time // per-user last owner-notification time
 }
 
@@ -119,6 +120,13 @@ func (h *Handler) SetResetter(r Resetter) {
 	h.resetter = r
 }
 
+// Close stops background goroutines owned by the handler.
+func (h *Handler) Close() {
+	if h.guided != nil {
+		h.guided.Stop()
+	}
+}
+
 // isAuthorized checks if the user is a member of the community group.
 // If communityGroupID is 0, everyone is authorized.
 // In group chats, non-members are silently ignored (no spam in group).
@@ -145,8 +153,14 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 		}
 		// Notify owner about unauthorized access attempt (at most once per user per hour)
 		if h.ownerID > 0 {
-			if last, ok := h.unauthNotified[userID]; !ok || time.Since(last) > 1*time.Hour {
+			h.unauthMu.Lock()
+			last, ok := h.unauthNotified[userID]
+			shouldNotify := !ok || time.Since(last) > 1*time.Hour
+			if shouldNotify {
 				h.unauthNotified[userID] = time.Now()
+			}
+			h.unauthMu.Unlock()
+			if shouldNotify {
 				notif := fmt.Sprintf("⚠️ <b>Unauthorized access attempt</b>\n\nUser: <a href=\"tg://user?id=%d\">%d</a>\nChat: <code>%d</code>\nType: %s",
 					userID, userID, chatID, chatType)
 				_, _ = h.sender.SendHTML(ctx, h.ownerID, notif)
@@ -1023,7 +1037,13 @@ func (h *Handler) checkRevengeWarning(ctx context.Context, userID int64, trade *
 func (h *Handler) setEditSession(userID int64, sess *TradeEditSession) {
 	h.editMu.Lock()
 	defer h.editMu.Unlock()
-	sess.ExpiresAt = time.Now().Add(15 * time.Minute)
+	now := time.Now()
+	for id, s := range h.editSessions {
+		if now.After(s.ExpiresAt) {
+			delete(h.editSessions, id)
+		}
+	}
+	sess.ExpiresAt = now.Add(15 * time.Minute)
 	h.editSessions[userID] = sess
 }
 

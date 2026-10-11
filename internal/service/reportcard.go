@@ -37,12 +37,6 @@ func NewReportCardService(
 
 // GenerateMonthlyReport generates (or returns cached) a monthly report card.
 func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramID int64, yearMonth string) (*domain.MonthlyReportCard, error) {
-	// Check cache first
-	cached, err := s.store.GetReportCard(ctx, telegramID, yearMonth)
-	if err == nil && cached != nil {
-		return cached, nil
-	}
-
 	// Parse yearMonth to determine the month boundaries
 	t, err := time.ParseInLocation("2006-01", yearMonth, wib)
 	if err != nil {
@@ -110,6 +104,15 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		}
 	}
 
+	// Return cached report card if trade stats for the month haven't changed
+	cached, err := s.store.GetReportCard(ctx, telegramID, yearMonth)
+	if err == nil && cached != nil &&
+		cached.TotalTrades == len(monthTrades) &&
+		cached.Wins == wins &&
+		cached.Losses == losses &&
+		cached.TotalRR == totalRR {
+		return cached, nil
+	}
 	totalTrades := len(monthTrades)
 	winRate := 0.0
 	closed := wins + losses + breakEvens

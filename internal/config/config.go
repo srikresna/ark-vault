@@ -12,7 +12,6 @@ type Config struct {
 	TelegramToken  string
 	NotionToken    string
 	NotionParentID string // The parent page ID under which member pages are created
-	BotUsername     string
 	LogLevel       string
 
 	// Report settings
@@ -42,7 +41,6 @@ func Load() (*Config, error) {
 		TelegramToken:  strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		NotionToken:    strings.TrimSpace(os.Getenv("NOTION_TOKEN")),
 		NotionParentID: strings.TrimSpace(os.Getenv("NOTION_PARENT_PAGE_ID")),
-		BotUsername:    strings.TrimSpace(os.Getenv("BOT_USERNAME")),
 		LogLevel:       strings.TrimSpace(os.Getenv("LOG_LEVEL")),
 		ReportDay:      strings.TrimSpace(os.Getenv("REPORT_DAY")),
 	}

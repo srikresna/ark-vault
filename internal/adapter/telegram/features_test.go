@@ -184,3 +184,32 @@ func TestFormatStatsWithPeriodAndRevengeWarning(t *testing.T) {
 		t.Errorf("FormatRevengeWarning(3) should contain Cooldown Warning, got %q", warn)
 	}
 }
+
+func TestHandler_EditSessionSweepAndClose(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewHandler(NewSender("tok"), Services{}, nil, nil, nil, NewRateLimiter(10, time.Minute), logger, 0, 0)
+	defer h.Close()
+
+	// Insert an already-expired session manually
+	h.editMu.Lock()
+	h.editSessions[100] = &TradeEditSession{
+		TradeID:   "expired",
+		ExpiresAt: time.Now().Add(-time.Minute),
+	}
+	h.editMu.Unlock()
+
+	// Setting a new session should sweep the expired one
+	h.setEditSession(200, &TradeEditSession{TradeID: "active"})
+
+	h.editMu.RLock()
+	_, expiredStillPresent := h.editSessions[100]
+	_, activePresent := h.editSessions[200]
+	h.editMu.RUnlock()
+
+	if expiredStillPresent {
+		t.Errorf("expected expired edit session for user 100 to be swept")
+	}
+	if !activePresent {
+		t.Errorf("expected active edit session for user 200 to be present")
+	}
+}
