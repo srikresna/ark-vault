@@ -22,13 +22,13 @@ The codebase follows **Hexagonal Architecture (Ports & Adapters)** with idiomati
 - `cmd/bot/` — Application entrypoint (`main.go`), manual dependency injection, signal handling (`SIGINT`/`SIGTERM`), and scheduled job definitions.
 - `internal/domain/` — Pure domain models and business rules with zero external/I/O dependencies (`trade.go`, `stats.go`, `xp.go`, `asset.go`, `gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `analytics.go`).
 - `internal/service/` — Use-case orchestration (`journal.go`, `gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `leaderboard.go`, `report.go`, `analytics.go`, `reportcard.go`) and consumer-side interfaces (`contracts.go`).
-- `internal/adapter/telegram/` — Telegram Bot API client (`bot.go`, `sender.go`), update router (`handler.go`), `#journal` parser (`parser.go`), 9-step wizard (`guided.go`), HTML message builders (`formatter.go`), and sliding-window rate limiter (`ratelimit.go`).
+- `internal/adapter/telegram/` — Telegram Bot API client (`bot.go`, `sender.go`), single-source command catalog (`commands.go`), update router (`handler.go`), `#journal` parser (`parser.go`), 9-step wizard (`guided.go`), HTML message builders (`formatter.go`), and sliding-window rate limiter (`ratelimit.go`).
 - `internal/adapter/notion/` — Notion REST client (`client.go`, API version `2022-06-28`), 3-tier member provisioning/lookup (`member.go`), cached trade CRUD (`trade.go`), and binary screenshot uploader (`image.go`).
 - `internal/adapter/badger/` — BadgerDB v4 wrapper with 5-minute value-log GC (`store.go`) and 9 repositories using the `gam:` key namespace (`gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `analytics.go`, `cache.go`).
 - `internal/adapter/exporter/` — Zero-dependency CSV exporter with formula-injection sanitization (`csv.go`) and minimal raw PDF generator (`pdf.go`).
 - `internal/adapter/gemini/` — Google Gemini `generateContent` REST client (`analyzer.go`).
 - `internal/scheduler/` — Hourly ticker with `MarkAndCheck(jobName, now)` clock-hour deduplication (`scheduler.go`).
-- `pkg/` — Shared stateless utilities (`pkg/formatter/number.go`, `pkg/timeutil/tz.go`).
+- `pkg/` — Shared stateless utilities (`pkg/timeutil/tz.go`).
 
 ## Development Commands
 

@@ -1,0 +1,75 @@
+# ARK Vault
+
+**ARK Vault** is a community-focused Telegram bot written in Go 1.23 that automates trade journal recording into per-member Notion pages and inline databases, paired with a local BadgerDB gamification engine (XP, 10 career levels, daily streaks, 13 achievement badges, rotating weekly challenges, monthly goals, dual-mode reminders) and optional Google Gemini AI trade coaching (`/analyze`, `/reportcard`).
+
+## Features
+
+- **Dual Journaling Flows**:
+  - `/journal` — 9-step interactive guided wizard with inline buttons and optional screenshot upload.
+  - `#journal` — Fast single-message text parser (`Pair`, `Type`, `RR`, `Session`, `Confluence`) with photo caption support.
+- **Interactive Trade Management**:
+  - `/open` — View and close open trades (`WIN`, `LOSS`, `BE`).
+  - `/history` — Paginated trade history with inline edit and delete actions.
+  - `/undo` — Delete the most recently recorded trade and reconcile XP.
+- **Analytics & Reports**:
+  - `/stats [week|month] [@username]` — Win rate, total/avg RR, expectancy, profit factor, per-asset/session breakdown, and revenge-trading warnings.
+  - `/leaderboard [week|month] [rr]` — Community Top 10 rankings.
+  - `/report` — Weekly community summary (also auto-posted by the scheduler).
+  - `/export [pdf]` — Sanitized CSV and zero-dependency PDF trade journal export.
+- **Gamification & AI Coaching**:
+  - `/profile`, `/badges`, `/challenge`, `/goal`, `/reminder` — Progression, streaks, badges, rotating weekly challenges, monthly targets, and daily/community reminders (all evaluated in `Asia/Jakarta` / `WIB`).
+  - `/analyze` & `/reportcard [current]` — AI-powered trade diagnostics and monthly report cards via Google Gemini.
+
+## Architecture
+
+The project follows **Hexagonal Architecture (Ports & Adapters)** with consumer-side interfaces and a strict stdlib-first policy (`github.com/dgraph-io/badger/v4` is the sole direct dependency):
+
+```
+cmd/bot/main.go                  # Composition root, DI wiring, signal handling, scheduler jobs
+internal/
+  config/                        # Environment variable parsing & validation
+  domain/                        # Pure domain models & business rules (zero external deps)
+  service/                       # Application use-cases & consumer-side port interfaces
+  scheduler/                     # Hourly clock-deduplicated job runner with panic recovery
+  adapter/
+    telegram/                    # Long-polling Bot API client, command catalog, handler, wizard
+    notion/                      # Notion REST client with retry/backoff, pagination & trade CRUD
+    badger/                      # BadgerDB v4 store with GC, atomic badge claims & TTL caches
+    gemini/                      # Google Gemini REST analyzer
+    exporter/                    # Formula-safe CSV & raw PDF generators
+pkg/timeutil/                    # Canonical WIB (UTC+7) timezone & week-boundary helpers
+```
+
+## Quick Start
+
+### 1. Configure Environment
+
+Copy `.env.example` to `.env` and fill in the required credentials:
+
+```bash
+cp .env.example .env
+```
+
+Required variables:
+- `TELEGRAM_BOT_TOKEN` — Telegram Bot token from `@BotFather`
+- `NOTION_TOKEN` — Notion internal integration secret
+- `NOTION_PARENT_PAGE_ID` — Notion page ID shared with the integration under which member journals are provisioned
+
+### 2. Run with Docker Compose
+
+```bash
+docker compose up -d --build
+```
+
+### 3. Build & Test Locally
+
+```bash
+# Build static binary
+CGO_ENABLED=0 go build -ldflags="-s -w" -o ark-vault ./cmd/bot
+
+# Run unit tests with race detector
+go test -v -race ./...
+
+# Run linter
+golangci-lint run ./...
+```

@@ -1,7 +1,11 @@
 # Binaries
+/ark-vault
+/ark-vault.exe
 /ark-journal
 /cmd/bot/bot
 
+# Local session notes
+.remember/
 # Environment
 .env
 

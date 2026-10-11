@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -38,12 +39,19 @@ func (s *Scheduler) Add(job Job) {
 	s.jobs = append(s.jobs, job)
 }
 
-// Start runs all registered jobs. Blocks until ctx is cancelled.
+// Start runs all registered jobs and blocks until ctx is cancelled and all
+// running job goroutines have exited.
 func (s *Scheduler) Start(ctx context.Context) {
+	var wg sync.WaitGroup
 	for _, job := range s.jobs {
-		go s.runJob(ctx, job)
+		wg.Add(1)
+		go func(j Job) {
+			defer wg.Done()
+			s.runJob(ctx, j)
+		}(job)
 	}
 	<-ctx.Done()
+	wg.Wait()
 }
 
 // hourKey returns a dedup key for the current clock-hour.
@@ -77,9 +85,22 @@ func (s *Scheduler) runJob(ctx context.Context, job Job) {
 			return
 		case <-ticker.C:
 			s.logger.Info("scheduler: running job", "name", job.Name)
-			if err := job.Run(ctx); err != nil {
-				s.logger.Error("scheduler: job failed", "name", job.Name, "error", err)
-			}
+			s.executeJobSafely(ctx, job)
 		}
+	}
+}
+
+func (s *Scheduler) executeJobSafely(ctx context.Context, job Job) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("scheduler: job panicked",
+				"name", job.Name,
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	if err := job.Run(ctx); err != nil {
+		s.logger.Error("scheduler: job failed", "name", job.Name, "error", err)
 	}
 }

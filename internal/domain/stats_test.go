@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 func TestCalculateStats(t *testing.T) {
 	trades := []Trade{
@@ -142,5 +144,42 @@ func TestFilterTradesByPeriodAndConsecutiveLossesToday(t *testing.T) {
 	allTrades := FilterTradesByPeriod(trades, "all", now)
 	if len(allTrades) != 5 {
 		t.Errorf("FilterTradesByPeriod(all) count = %d, want 5", len(allTrades))
+	}
+}
+
+// TestWIBBoundariesAreLocationIndependent pins the invariant that every
+// day/week/month boundary is derived in WIB no matter which location the caller
+// passes in. A caller handing over a UTC instant must not shift the boundary.
+func TestWIBBoundariesAreLocationIndependent(t *testing.T) {
+	// 2026-10-10 23:30 UTC == 2026-10-11 06:30 WIB (Sunday in WIB, Saturday in UTC).
+	utcNow := time.Date(2026, 10, 10, 23, 30, 0, 0, time.UTC)
+	wibNow := utcNow.In(timeutil.WIB)
+
+	if got, want := timeutil.StartOfWeek(utcNow), timeutil.StartOfWeek(wibNow); !got.Equal(want) {
+		t.Errorf("StartOfWeek differs by location: utc=%s wib=%s", got, want)
+	}
+	// The week starts Monday 2026-10-05 00:00 WIB, not Sunday 2026-10-04.
+	wantMonday := time.Date(2026, 10, 5, 0, 0, 0, 0, timeutil.WIB)
+	if got := timeutil.StartOfWeek(utcNow); !got.Equal(wantMonday) {
+		t.Errorf("StartOfWeek = %s, want %s", got, wantMonday)
+	}
+
+	// A trade recorded at 06:30 WIB on Sunday belongs to that same WIB day.
+	trade := Trade{ID: "1", Date: wibNow, Status: StatusLoss, ResultRR: -1}
+	if got := ConsecutiveLossesToday([]Trade{trade}, utcNow); got != 1 {
+		t.Errorf("ConsecutiveLossesToday(utc caller) = %d, want 1", got)
+	}
+
+	// Week filter must include the Sunday trade for both callers.
+	if got := len(FilterTradesByPeriod([]Trade{trade}, "week", utcNow)); got != 1 {
+		t.Errorf("FilterTradesByPeriod(week, utc) = %d trades, want 1", got)
+	}
+
+	// YearWeekString must agree regardless of the caller's location.
+	if got, want := YearWeekString(utcNow), YearWeekString(wibNow); got != want {
+		t.Errorf("YearWeekString differs by location: utc=%s wib=%s", got, want)
+	}
+	if got, want := YearWeekString(utcNow), "2026-W41"; got != want {
+		t.Errorf("YearWeekString = %s, want %s", got, want)
 	}
 }

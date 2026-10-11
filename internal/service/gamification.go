@@ -2,38 +2,34 @@ package service
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
-// wib is the Asia/Jakarta timezone used for streak date calculations.
-var wib *time.Location
-
-func init() {
-	var err error
-	wib, err = time.LoadLocation("Asia/Jakarta")
-	if err != nil {
-		wib = time.FixedZone("WIB", 7*3600)
-	}
-}
 
 // GamificationService orchestrates XP, levelling and streak logic.
+//
+// Concurrency: the bot handles every Telegram update in its own goroutine, so
+// profile/streak updates are genuinely concurrent. Every mutation below is a
+// read-modify-write of a single Badger key (Badger offers no cross-key
+// transaction through this store), which without serialisation loses XP and
+// lets two trades both pass the daily cap. A single mutex is sufficient and
+// correct because the process is the only writer: Badger takes an exclusive
+// directory lock, so the bot cannot run as more than one replica.
+//
+// Lock ordering across services is challenge → goal → badge → gamification;
+// this service is always the innermost, so it must never call back out.
 type GamificationService struct {
-	store   GamificationStore
-	trades  TradeRepository
-	members MemberRepository
+	mu    sync.Mutex
+	store GamificationStore
 }
 
 // NewGamificationService creates a new GamificationService.
-func NewGamificationService(
-	store GamificationStore,
-	trades TradeRepository,
-	members MemberRepository,
-) *GamificationService {
+func NewGamificationService(store GamificationStore) *GamificationService {
 	return &GamificationService{
-		store:   store,
-		trades:  trades,
-		members: members,
+		store: store,
 	}
 }
 
@@ -50,6 +46,15 @@ type OnTradeResult struct {
 
 // OnTradeRecorded processes gamification effects when a trade is recorded.
 func (s *GamificationService) OnTradeRecorded(ctx context.Context, memberID int64, trade *domain.Trade) (*OnTradeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.onTradeRecorded(ctx, memberID, trade)
+}
+
+// onTradeRecorded is the lock-free body of OnTradeRecorded; the caller must
+// hold s.mu.
+func (s *GamificationService) onTradeRecorded(ctx context.Context, memberID int64, trade *domain.Trade) (*OnTradeResult, error) {
 	// 1. Get or create profile
 	profile, err := s.store.GetProfile(ctx, memberID)
 	if err != nil {
@@ -76,7 +81,7 @@ func (s *GamificationService) OnTradeRecorded(ctx context.Context, memberID int6
 	}
 
 	// 3. Compute today in WIB
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 	today := now.Format("2006-01-02")
 	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 
@@ -99,7 +104,7 @@ func (s *GamificationService) OnTradeRecorded(ctx context.Context, memberID int6
 	streak.UpdatedAt = now
 
 	// 5. Calculate XP (subject to daily trade XP cap)
-	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, wib)
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, timeutil.WIB)
 	todayEvents, err := s.store.GetXPEvents(ctx, memberID, todayStart)
 	if err != nil {
 		return nil, err
@@ -183,12 +188,20 @@ func (s *GamificationService) OnTradeRecorded(ctx context.Context, memberID int6
 // AwardXP grants the given amount of XP to a member for the specified reason.
 // It updates the profile, appends an XP event, and returns the updated profile.
 func (s *GamificationService) AwardXP(ctx context.Context, memberID int64, amount int, reason string) (*domain.GamificationProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.awardXP(ctx, memberID, amount, reason)
+}
+
+// awardXP is the lock-free body of AwardXP; the caller must hold s.mu.
+func (s *GamificationService) awardXP(ctx context.Context, memberID int64, amount int, reason string) (*domain.GamificationProfile, error) {
 	profile, err := s.GetProfile(ctx, memberID)
 	if err != nil {
 		return nil, err
 	}
 
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 	profile.TotalXP += amount
 	profile.Level, profile.Title = domain.LevelForXP(profile.TotalXP)
 	profile.UpdatedAt = now
@@ -219,7 +232,7 @@ func (s *GamificationService) GetProfile(ctx context.Context, memberID int64) (*
 			TotalXP:    0,
 			Level:      1,
 			Title:      "Retail",
-			UpdatedAt:  time.Now().In(wib),
+			UpdatedAt:  time.Now().In(timeutil.WIB),
 		}
 	} else {
 		profile.Level, profile.Title = domain.LevelForXP(profile.TotalXP)
@@ -236,7 +249,7 @@ func (s *GamificationService) GetStreak(ctx context.Context, memberID int64) (*d
 	if streak == nil {
 		streak = &domain.StreakData{
 			TelegramID: memberID,
-			UpdatedAt:  time.Now().In(wib),
+			UpdatedAt:  time.Now().In(timeutil.WIB),
 		}
 	}
 	return streak, nil
@@ -263,6 +276,9 @@ func TradeBaseXP(trade *domain.Trade) int {
 
 // AdjustXPForTradeChange reconciles a member's XP and level when a trade is edited, closed, or deleted (newTrade == nil).
 func (s *GamificationService) AdjustXPForTradeChange(ctx context.Context, memberID int64, oldTrade, newTrade *domain.Trade) (*domain.GamificationProfile, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	profile, err := s.GetProfile(ctx, memberID)
 	if err != nil {
 		return nil, 0, err
@@ -275,7 +291,7 @@ func (s *GamificationService) AdjustXPForTradeChange(ctx context.Context, member
 		return profile, 0, nil
 	}
 
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 	profile.TotalXP += delta
 	if profile.TotalXP < 0 {
 		profile.TotalXP = 0

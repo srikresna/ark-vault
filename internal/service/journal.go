@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // JournalService orchestrates trade recording.
@@ -27,7 +28,11 @@ func (s *JournalService) RecordTrade(ctx context.Context, memberTgID int64, user
 		return fmt.Errorf("validation: %w", err)
 	}
 	if trade.Date.IsZero() {
-		trade.Date = time.Now().UTC()
+		// Stamp the WIB calendar day: every downstream boundary (daily XP cap,
+		// streaks, reminders, week/month filters) is evaluated in WIB, so a UTC
+		// stamp would file trades recorded between 00:00 and 07:00 WIB under the
+		// previous day in Notion.
+		trade.Date = time.Now().In(timeutil.WIB)
 	}
 	if trade.Status == "" {
 		trade.Status = domain.StatusOpen
@@ -39,7 +44,7 @@ func (s *JournalService) RecordTrade(ctx context.Context, memberTgID int64, user
 		TelegramID: memberTgID,
 		Username:   username,
 		FirstName:  firstName,
-		JoinDate:   time.Now().UTC(),
+		JoinDate:   time.Now().In(timeutil.WIB),
 	}
 	if _, err := s.members.EnsureMember(ctx, member); err != nil {
 		return fmt.Errorf("ensure member: %w", err)
@@ -73,7 +78,7 @@ func (s *JournalService) GetMemberStatsByPeriod(ctx context.Context, memberTgID 
 	if err != nil {
 		return nil, fmt.Errorf("get trades: %w", err)
 	}
-	filtered := domain.FilterTradesByPeriod(trades, period, time.Now().In(wib))
+	filtered := domain.FilterTradesByPeriod(trades, period, time.Now().In(timeutil.WIB))
 	if len(filtered) == 0 {
 		return nil, nil
 	}

@@ -48,13 +48,18 @@ type BadgeStore interface {
 	AwardBadge(ctx context.Context, award *domain.BadgeAward) error
 }
 
+// BadgeClaimer atomically awards a badge, reporting whether this call won the
+// claim. Stores implementing it let BadgeService avoid the
+// check-then-award race; the service falls back to HasBadge+AwardBadge for
+// stores that do not (see BadgeService.awardIfUnclaimed).
+type BadgeClaimer interface {
+	ClaimBadge(ctx context.Context, award *domain.BadgeAward) (bool, error)
+}
+
 // ChallengeStore provides storage for weekly challenges.
 type ChallengeStore interface {
 	GetChallenge(ctx context.Context, yearWeek string) (*domain.WeeklyChallenge, error)
 	SaveChallenge(ctx context.Context, challenge *domain.WeeklyChallenge) error
-	GetChallengeEntry(ctx context.Context, yearWeek string, telegramID int64) (*domain.ChallengeEntry, error)
-	SaveChallengeEntry(ctx context.Context, entry *domain.ChallengeEntry) error
-	GetChallengeEntries(ctx context.Context, yearWeek string) ([]domain.ChallengeEntry, error)
 }
 
 // ReminderStore provides storage for reminder preferences.

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 // LeaderboardEntry represents one member's ranking.
 type LeaderboardEntry struct {
@@ -42,7 +43,7 @@ func (s *LeaderboardService) GetLeaderboardByPeriod(ctx context.Context, metric,
 		return nil, fmt.Errorf("list members: %w", err)
 	}
 
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 	var entries []LeaderboardEntry
 	for _, m := range members {
 		trades, err := s.trades.GetTrades(ctx, m.TelegramID)

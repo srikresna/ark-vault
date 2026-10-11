@@ -2,11 +2,15 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // ReportCardService generates monthly report cards.
@@ -38,7 +42,7 @@ func NewReportCardService(
 // GenerateMonthlyReport generates (or returns cached) a monthly report card.
 func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramID int64, yearMonth string) (*domain.MonthlyReportCard, error) {
 	// Parse yearMonth to determine the month boundaries
-	t, err := time.ParseInLocation("2006-01", yearMonth, wib)
+	t, err := time.ParseInLocation("2006-01", yearMonth, timeutil.WIB)
 	if err != nil {
 		return nil, fmt.Errorf("invalid year-month format: %w", err)
 	}
@@ -104,15 +108,6 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		}
 	}
 
-	// Return cached report card if trade stats for the month haven't changed
-	cached, err := s.store.GetReportCard(ctx, telegramID, yearMonth)
-	if err == nil && cached != nil &&
-		cached.TotalTrades == len(monthTrades) &&
-		cached.Wins == wins &&
-		cached.Losses == losses &&
-		cached.TotalRR == totalRR {
-		return cached, nil
-	}
 	totalTrades := len(monthTrades)
 	winRate := 0.0
 	closed := wins + losses + breakEvens
@@ -120,7 +115,8 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		winRate = float64(wins) / float64(closed) * 100
 	}
 
-	// Gamification data
+	// Gamification data (evaluated before cache check so level/XP/badge/streak
+	// updates invalidate a stale report card).
 	profile, _ := s.gam.GetProfile(ctx, telegramID)
 	streak, _ := s.gam.GetStreak(ctx, telegramID)
 	badges, _ := s.badges.GetBadges(ctx, telegramID)
@@ -157,6 +153,12 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		longestStreak = streak.LongestStreak
 	}
 
+
+	sourceHash := hashReportCardInputs(monthTrades, level, title, xpEarned, badgesEarned, longestStreak)
+	cached, err := s.store.GetReportCard(ctx, telegramID, yearMonth)
+	if err == nil && cached != nil && cached.SourceHash != "" && cached.SourceHash == sourceHash {
+		return cached, nil
+	}
 	// Build asset breakdown
 	assetBreakdown := make(map[string]domain.AssetStats)
 	for key, acc := range assetMap {
@@ -175,6 +177,7 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		TelegramID:     telegramID,
 		YearMonth:      yearMonth,
 		GeneratedAt:    time.Now(),
+		SourceHash:     sourceHash,
 		TotalTrades:    totalTrades,
 		Wins:           wins,
 		Losses:         losses,
@@ -222,7 +225,13 @@ func (s *ReportCardService) generateAISummary(ctx context.Context, report *domai
 
 	if len(report.AssetBreakdown) > 0 {
 		sb.WriteString("\nPer asset:\n")
-		for asset, stats := range report.AssetBreakdown {
+		assets := make([]string, 0, len(report.AssetBreakdown))
+		for asset := range report.AssetBreakdown {
+			assets = append(assets, asset)
+		}
+		sort.Strings(assets)
+		for _, asset := range assets {
+			stats := report.AssetBreakdown[asset]
 			fmt.Fprintf(&sb, "- %s: %d trades, %.1f%% WR, %+.1fR\n", asset, stats.Total, stats.WinRate, stats.TotalRR)
 		}
 	}
@@ -230,4 +239,20 @@ func (s *ReportCardService) generateAISummary(ctx context.Context, report *domai
 	sb.WriteString("\nBerikan ringkasan singkat yang memotivasi, tanpa markdown formatting.")
 
 	return s.ai.AnalyzeTrades(ctx, sb.String())
+}
+
+func hashReportCardInputs(trades []domain.Trade, level int, title string, xpEarned, badgesEarned, longestStreak int) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "gam:%d|%s|%d|%d|%d\n", level, title, xpEarned, badgesEarned, longestStreak)
+	for _, t := range trades {
+		_, _ = fmt.Fprintf(h, "tr:%s|%d|%s|%s|%s|%.6f\n",
+			t.ID,
+			t.Date.UnixNano(),
+			t.Symbol,
+			t.Direction,
+			t.Status,
+			t.ResultRR,
+		)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }

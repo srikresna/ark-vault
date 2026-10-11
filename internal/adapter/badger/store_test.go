@@ -169,6 +169,24 @@ func TestBadgeRepo(t *testing.T) {
 	if len(badges) != 1 || badges[0].BadgeID != domain.BadgeFirstTrade {
 		t.Fatalf("unexpected badges list: %+v", badges)
 	}
+
+	// ClaimBadge is atomic: first claim succeeds, repeat claim returns false.
+	claimed1, err := repo.ClaimBadge(ctx, &domain.BadgeAward{
+		TelegramID: 100,
+		BadgeID:    domain.Badge10Trades,
+		AwardedAt:  time.Now().Truncate(time.Second),
+	})
+	if err != nil || !claimed1 {
+		t.Fatalf("expected first ClaimBadge to succeed, got claimed=%v err=%v", claimed1, err)
+	}
+	claimed2, err := repo.ClaimBadge(ctx, &domain.BadgeAward{
+		TelegramID: 100,
+		BadgeID:    domain.Badge10Trades,
+		AwardedAt:  time.Now().Truncate(time.Second),
+	})
+	if err != nil || claimed2 {
+		t.Fatalf("expected second ClaimBadge to return false, got claimed=%v err=%v", claimed2, err)
+	}
 }
 
 func TestChallengeRepo(t *testing.T) {
@@ -206,33 +224,6 @@ func TestChallengeRepo(t *testing.T) {
 	}
 	if gotChallenge == nil || gotChallenge.YearWeek != "2026-W41" || gotChallenge.Title != "Trade Warrior" {
 		t.Fatalf("unexpected challenge fetched: %+v", gotChallenge)
-	}
-
-	// Challenge entry
-	entry := &domain.ChallengeEntry{
-		YearWeek:   "2026-W41",
-		TelegramID: 100,
-		Username:   "trader1",
-		Value:      15,
-	}
-	if err := repo.SaveChallengeEntry(ctx, entry); err != nil {
-		t.Fatalf("failed to save challenge entry: %v", err)
-	}
-
-	gotEntry, err := repo.GetChallengeEntry(ctx, "2026-W41", 100)
-	if err != nil {
-		t.Fatalf("failed to get challenge entry: %v", err)
-	}
-	if gotEntry == nil || gotEntry.Value != 15 {
-		t.Fatalf("unexpected challenge entry: %+v", gotEntry)
-	}
-
-	entries, err := repo.GetChallengeEntries(ctx, "2026-W41")
-	if err != nil {
-		t.Fatalf("failed to get challenge entries: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
 }
 

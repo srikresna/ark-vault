@@ -180,18 +180,28 @@ func (r *MemberRepo) GetMember(ctx context.Context, telegramID int64) (*domain.M
 	return m, nil
 }
 
-// ListMembers returns all known members, warming from the persistent store if the in-memory cache is cold.
+// ListMembers returns all known members.
+//
+// The persistent store is always merged in (not only when the in-memory map is
+// cold): previously a single member cached in memory — e.g. the one who just
+// sent a command — suppressed the Badger roster entirely, so leaderboards,
+// weekly reports and challenge standings silently ranked a subset of the
+// community. In-memory entries win on conflict because they are fresher.
 func (r *MemberRepo) ListMembers(ctx context.Context) ([]domain.Member, error) {
-	r.mu.RLock()
-	n := len(r.cache)
-	r.mu.RUnlock()
-
-	if n == 0 && r.store != nil {
-		if persisted, err := r.store.ListCachedMembers(ctx); err == nil && len(persisted) > 0 {
+	if r.store != nil {
+		persisted, err := r.store.ListCachedMembers(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list cached members: %w", err)
+		}
+		if len(persisted) > 0 {
 			r.mu.Lock()
 			for i := range persisted {
+				id := persisted[i].TelegramID
+				if _, ok := r.cache[id]; ok {
+					continue // in-memory copy is authoritative
+				}
 				cp := persisted[i]
-				r.cache[cp.TelegramID] = &cp
+				r.cache[id] = &cp
 			}
 			r.mu.Unlock()
 		}
@@ -206,62 +216,106 @@ func (r *MemberRepo) ListMembers(ctx context.Context) ([]domain.Member, error) {
 	return members, nil
 }
 
-// findMemberPage searches for a member page by Telegram ID in the callout text and resolves its trade database ID.
+// findMemberPage searches for a member page by Telegram ID and verifies the
+// match before using it.
+//
+// Notion search is fuzzy: it can return unrelated pages, and a result page
+// whose callout holds a different Telegram ID must never be used — writing a
+// trade to the wrong member's database is silent data corruption. Every
+// candidate is therefore confirmed by reading its callout text, and an
+// ambiguous or unverifiable result is reported as not-found instead of being
+// guessed from results[0].
 func (r *MemberRepo) findMemberPage(ctx context.Context, telegramID int64) (*domain.Member, error) {
-	query := fmt.Sprintf("Telegram ID: %d", telegramID)
-	raw, err := r.client.SearchPages(ctx, query)
+	items, err := r.client.SearchPagesAll(ctx, fmt.Sprintf("Telegram ID: %d", telegramID))
 	if err != nil {
 		return nil, err
 	}
 
-	var result struct {
-		Results []struct {
-			ID     string `json:"id"`
-			Object string `json:"object"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, err
+	want := fmt.Sprintf("Telegram ID: %d", telegramID)
+
+	for _, item := range items {
+		var page struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(item, &page); err != nil || page.ID == "" {
+			continue
+		}
+
+		dbID, callout, ok := r.inspectMemberPage(ctx, page.ID)
+		if !ok {
+			continue
+		}
+		if !containsTelegramID(callout, want) {
+			continue // search matched some other member's page
+		}
+		return &domain.Member{
+			TelegramID:   telegramID,
+			NotionPageID: page.ID,
+			NotionDBID:   dbID,
+		}, nil
 	}
 
-	if len(result.Results) == 0 {
-		return nil, nil
+	return nil, nil
+}
+
+// containsTelegramID reports whether callout text identifies the wanted member.
+//
+// The comparison is digit-boundary aware so "Telegram ID: 100" does not match a
+// callout for "Telegram ID: 1001".
+func containsTelegramID(callout, want string) bool {
+	idx := strings.Index(callout, want)
+	if idx < 0 {
+		return false
 	}
-
-	pageID := result.Results[0].ID
-	dbID := r.resolveTradeDBID(ctx, pageID)
-
-	return &domain.Member{
-		TelegramID:   telegramID,
-		NotionPageID: pageID,
-		NotionDBID:   dbID,
-	}, nil
+	end := idx + len(want)
+	if end >= len(callout) {
+		return true
+	}
+	next := callout[end]
+	return next < '0' || next > '9'
 }
 
 // resolveTradeDBID inspects child blocks of a member page to find its inline Trades database ID.
 func (r *MemberRepo) resolveTradeDBID(ctx context.Context, pageID string) string {
+	dbID, _, _ := r.inspectMemberPage(ctx, pageID)
+	return dbID
+}
+
+// inspectMemberPage reads a member page's children once, returning the inline
+// Trades database ID and the callout text used to identify the member.
+func (r *MemberRepo) inspectMemberPage(ctx context.Context, pageID string) (dbID, callout string, ok bool) {
 	if pageID == "" {
-		return ""
+		return "", "", false
 	}
-	raw, err := r.client.GetBlockChildren(ctx, pageID)
+	items, err := r.client.GetBlockChildrenAll(ctx, pageID)
 	if err != nil {
-		return ""
+		return "", "", false
 	}
-	var children struct {
-		Results []struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(raw, &children); err != nil {
-		return ""
-	}
-	for _, blk := range children.Results {
-		if blk.Type == "child_database" && blk.ID != "" {
-			return blk.ID
+	for _, item := range items {
+		var blk struct {
+			ID      string `json:"id"`
+			Type    string `json:"type"`
+			Callout *struct {
+				RichText []struct {
+					PlainText string `json:"plain_text"`
+				} `json:"rich_text"`
+			} `json:"callout"`
+		}
+		if json.Unmarshal(item, &blk) != nil {
+			continue
+		}
+		switch {
+		case blk.Type == "child_database" && blk.ID != "" && dbID == "":
+			dbID = blk.ID
+		case blk.Type == "callout" && blk.Callout != nil && callout == "":
+			var sb strings.Builder
+			for _, rt := range blk.Callout.RichText {
+				sb.WriteString(rt.PlainText)
+			}
+			callout = sb.String()
 		}
 	}
-	return ""
+	return dbID, callout, true
 }
 
 // createTradeDatabase creates the inline Notion database for trades.
@@ -356,44 +410,42 @@ func (r *MemberRepo) ResetAll(ctx context.Context) (int, error) {
 
 	// 1. Direct children of parent page
 	if r.parentID != "" {
-		if raw, err := r.client.GetBlockChildren(ctx, r.parentID); err == nil {
-			var children struct {
-				Results []struct {
+		if items, err := r.client.GetBlockChildrenAll(ctx, r.parentID); err == nil {
+			for _, item := range items {
+				var blk struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
 					Archived bool   `json:"archived"`
-				} `json:"results"`
-			}
-			if json.Unmarshal(raw, &children) == nil {
-				for _, blk := range children.Results {
-					if !blk.Archived && (blk.Type == "child_page" || blk.Type == "child_database") && blk.ID != "" {
-						toArchive[blk.ID] = true
-					}
+				}
+				if json.Unmarshal(item, &blk) != nil {
+					continue
+				}
+				if !blk.Archived && (blk.Type == "child_page" || blk.Type == "child_database") && blk.ID != "" {
+					toArchive[blk.ID] = true
 				}
 			}
 		}
 	}
 
 	// 2. Search pages matching "Trade Journal" under parent page
-	if raw, err := r.client.SearchPages(ctx, "Trade Journal"); err == nil {
-		var searchResp struct {
-			Results []struct {
+	if items, err := r.client.SearchPagesAll(ctx, "Trade Journal"); err == nil {
+		for _, item := range items {
+			var p struct {
 				ID       string `json:"id"`
 				Archived bool   `json:"archived"`
 				Parent   struct {
 					Type   string `json:"type"`
 					PageID string `json:"page_id"`
 				} `json:"parent"`
-			} `json:"results"`
-		}
-		if json.Unmarshal(raw, &searchResp) == nil {
-			for _, p := range searchResp.Results {
-				if p.Archived || p.ID == "" {
-					continue
-				}
-				if normParent == "" || normalizeNotionID(p.Parent.PageID) == normParent {
-					toArchive[p.ID] = true
-				}
+			}
+			if json.Unmarshal(item, &p) != nil {
+				continue
+			}
+			if p.Archived || p.ID == "" {
+				continue
+			}
+			if normParent == "" || normalizeNotionID(p.Parent.PageID) == normParent {
+				toArchive[p.ID] = true
 			}
 		}
 	}

@@ -2,13 +2,19 @@ package service
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // GoalService manages monthly goals, progress tracking, and goal completion.
+//
+// Concurrency: see GamificationService for the lock-ordering rationale
+// (challenge → goal → badge → gamification).
 type GoalService struct {
+	mu       sync.Mutex
 	store    GoalStore
 	trades   TradeRepository
 	gamSvc   *GamificationService
@@ -27,19 +33,22 @@ func NewGoalService(store GoalStore, trades TradeRepository, gamSvc *Gamificatio
 
 // currentYearMonth returns the current year-month string in WIB.
 func currentYearMonth() string {
-	return time.Now().In(wib).Format("2006-01")
+	return time.Now().In(timeutil.WIB).Format("2006-01")
 }
 
 // monthStart returns the first moment of the current month in WIB.
 func monthStart() time.Time {
-	now := time.Now().In(wib)
-	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, wib)
+	now := time.Now().In(timeutil.WIB)
+	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, timeutil.WIB)
 }
 
 // SetGoal creates or updates a monthly goal for the user in the current month.
 func (s *GoalService) SetGoal(ctx context.Context, telegramID int64, goalType domain.GoalType, targetValue float64) (*domain.MonthlyGoal, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	ym := currentYearMonth()
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 
 	// Check for an existing goal this month.
 	existing, err := s.store.GetGoal(ctx, telegramID, ym)
@@ -75,6 +84,14 @@ func (s *GoalService) SetGoal(ctx context.Context, telegramID int64, goalType do
 // GetProgress returns the current progress toward the user's monthly goal.
 // Returns nil if no goal is set for the current month.
 func (s *GoalService) GetProgress(ctx context.Context, telegramID int64) (*domain.GoalProgress, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.getProgress(ctx, telegramID)
+}
+
+// getProgress is the lock-free body of GetProgress; the caller must hold s.mu.
+func (s *GoalService) getProgress(ctx context.Context, telegramID int64) (*domain.GoalProgress, error) {
 	ym := currentYearMonth()
 	goal, err := s.store.GetGoal(ctx, telegramID, ym)
 	if err != nil {
@@ -104,8 +121,15 @@ func (s *GoalService) GetProgress(ctx context.Context, telegramID int64) (*domai
 // CheckGoalCompletion checks if the user achieved their monthly goal.
 // Call this after each trade is recorded. Returns true if the goal was
 // newly completed on this call.
+//
+// The "already achieved" check, the goal write, the XP award and the badge
+// award are performed under the service lock: previously two concurrent trades
+// could both observe an unachieved goal and award the goal XP twice.
 func (s *GoalService) CheckGoalCompletion(ctx context.Context, telegramID int64) (bool, error) {
-	progress, err := s.GetProgress(ctx, telegramID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	progress, err := s.getProgress(ctx, telegramID)
 	if err != nil {
 		return false, err
 	}
@@ -120,7 +144,7 @@ func (s *GoalService) CheckGoalCompletion(ctx context.Context, telegramID int64)
 	}
 
 	// Mark goal as achieved.
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 	progress.Goal.Achieved = true
 	progress.Goal.AchievedAt = now
 	if err := s.store.SaveGoal(ctx, progress.Goal); err != nil {

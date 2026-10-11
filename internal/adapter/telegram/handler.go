@@ -125,6 +125,9 @@ func (h *Handler) Close() {
 	if h.guided != nil {
 		h.guided.Stop()
 	}
+	if h.limiter != nil {
+		h.limiter.Stop()
+	}
 }
 
 // isAuthorized checks if the user is a member of the community group.
@@ -173,11 +176,16 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 
 // HandleUpdate processes a single Telegram update.
 func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
+	defer func() {
+		if r := recover(); r != nil && h.logger != nil {
+			h.logger.Error("recovered panic in HandleUpdate", "update_id", u.UpdateID, "panic", r)
+		}
+	}()
 	if u.CallbackQuery != nil {
 		h.handleCallback(ctx, u.CallbackQuery)
 		return
 	}
-	if u.Message == nil {
+	if u.Message == nil || u.Message.Chat == nil {
 		return
 	}
 
@@ -212,44 +220,11 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 		}
 	}
 
-	// Command routing
-	switch {
-	case strings.HasPrefix(text, "/journal"):
-		h.cmdJournal(ctx, msg)
-	case strings.HasPrefix(text, "/open"):
-		h.cmdOpen(ctx, msg)
-	case strings.HasPrefix(text, "/history"):
-		h.cmdHistory(ctx, msg)
-	case strings.HasPrefix(text, "/undo"):
-		h.cmdUndo(ctx, msg)
-	case strings.HasPrefix(text, "/stats"):
-		h.cmdStats(ctx, msg, text)
-	case strings.HasPrefix(text, "/leaderboard"):
-		h.cmdLeaderboard(ctx, msg, text)
-	case strings.HasPrefix(text, "/export"):
-		h.cmdExport(ctx, msg, text)
-	case strings.HasPrefix(text, "/report"):
-		h.cmdReport(ctx, msg)
-	case strings.HasPrefix(text, "/help"), strings.HasPrefix(text, "/start"):
-		isOwner := msg.From != nil && h.ownerID > 0 && msg.From.ID == h.ownerID
-		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatHelpForUser(isOwner), msg.MessageThreadID)
-	case strings.HasPrefix(text, "/profile"):
-		h.cmdProfile(ctx, msg)
-	case strings.HasPrefix(text, "/badges"):
-		h.cmdBadges(ctx, msg)
-	case strings.HasPrefix(text, "/challenge"):
-		h.cmdChallenge(ctx, msg)
-	case strings.HasPrefix(text, "/reminder"):
-		h.cmdReminder(ctx, msg, text)
-	case strings.HasPrefix(text, "/goal"):
-		h.cmdGoal(ctx, msg, text)
-	case strings.HasPrefix(text, "/analyze"):
-		h.cmdAnalyze(ctx, msg)
-	case strings.HasPrefix(text, "/reportcard"):
-		h.cmdReportCard(ctx, msg)
-	case strings.HasPrefix(text, "/reset"):
-		h.cmdReset(ctx, msg, text)
-	case strings.HasPrefix(text, "#journal"):
+	// Command routing (catalog-driven, see commands.go).
+	if h.dispatchCommand(ctx, msg, text) {
+		return
+	}
+	if strings.HasPrefix(text, "#journal") {
 		h.handleTextJournal(ctx, msg, text)
 	}
 }
@@ -463,8 +438,7 @@ func (h *Handler) cmdExport(ctx context.Context, msg *Message, text string) {
 
 // cmdReport generates and sends a weekly community summary.
 func (h *Handler) cmdReport(ctx context.Context, msg *Message) {
-	now := time.Now().UTC()
-	weekStart := timeutil.StartOfWeek(now, time.UTC)
+	weekStart := timeutil.StartOfWeek(time.Now())
 	weekEnd := weekStart.AddDate(0, 0, 7)
 
 	summary, err := h.svc.Report.GenerateWeeklySummary(ctx, weekStart, weekEnd)
@@ -479,8 +453,7 @@ func (h *Handler) cmdReport(ctx context.Context, msg *Message) {
 // SendScheduledReport sends the weekly report to a specific chat and optional topic thread.
 // Called by the scheduler.
 func (h *Handler) SendScheduledReport(ctx context.Context, chatID int64, threadID int) error {
-	now := time.Now().UTC()
-	weekStart := timeutil.StartOfWeek(now, time.UTC)
+	weekStart := timeutil.StartOfWeek(time.Now())
 	weekEnd := weekStart.AddDate(0, 0, 7)
 
 	summary, err := h.svc.Report.GenerateWeeklySummary(ctx, weekStart, weekEnd)
@@ -508,11 +481,14 @@ func (h *Handler) cmdProfile(ctx context.Context, msg *Message) {
 
 // handleCallback processes inline button presses.
 func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
+	if cb == nil || cb.From == nil {
+		return
+	}
 	_ = h.sender.AnswerCallback(ctx, cb.ID, "")
 
 	data := cb.Data
 	if data == "reset:confirm" || data == "reset:cancel" {
-		if cb.From == nil || h.ownerID == 0 || cb.From.ID != h.ownerID || cb.Message == nil {
+		if h.ownerID == 0 || cb.From.ID != h.ownerID || cb.Message == nil || cb.Message.Chat == nil {
 			return
 		}
 		if data == "reset:cancel" {
@@ -525,10 +501,9 @@ func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
 	}
 
 	// Community gate
-	if cb.Message != nil && !h.isAuthorized(ctx, cb.From.ID, cb.Message.Chat.ID, cb.Message.MessageThreadID, cb.Message.Chat.Type) {
+	if cb.Message != nil && cb.Message.Chat != nil && !h.isAuthorized(ctx, cb.From.ID, cb.Message.Chat.ID, cb.Message.MessageThreadID, cb.Message.Chat.Type) {
 		return
 	}
-
 	// Handle /open and /history callbacks before guided flow
 	if h.handleTradeActionCallback(ctx, cb) {
 		return
@@ -1026,11 +1001,7 @@ func (h *Handler) checkRevengeWarning(ctx context.Context, userID int64, trade *
 	if err != nil {
 		return ""
 	}
-	wibLoc, err := time.LoadLocation("Asia/Jakarta")
-	if err != nil {
-		wibLoc = time.FixedZone("WIB", 7*3600)
-	}
-	losses := domain.ConsecutiveLossesToday(trades, time.Now().In(wibLoc))
+	losses := domain.ConsecutiveLossesToday(trades, time.Now())
 	return FormatRevengeWarning(losses)
 }
 

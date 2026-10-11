@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 type mockReminderStore struct {
@@ -49,7 +50,7 @@ func TestReminderService_GetDueReminders_CommunityVsPersonal(t *testing.T) {
 	svc := NewReminderService(remStore, gamStore, logger)
 
 	ctx := context.Background()
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 	hour := now.Hour()
 	today := now.Format("2006-01-02")
 

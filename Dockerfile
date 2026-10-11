@@ -11,8 +11,10 @@ RUN go mod download
 
 # Build binary
 COPY . .
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-s -w" \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -trimpath \
     -o /ark-vault \
     ./cmd/bot
 

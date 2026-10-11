@@ -279,36 +279,20 @@ func (s *Sender) SetMyCommands(ctx context.Context, commands []BotCommand, scope
 	return err
 }
 
-// RegisterCommandScopes registers public commands for everyone and includes /reset only for the owner's private chat scope.
+// RegisterCommandScopes registers public commands for everyone and includes
+// owner-only commands (e.g. /reset) for the owner's private chat scope.
+//
+// The menu is derived from commandCatalog, the same table the router uses, so a
+// command can no longer be registered but unroutable (or vice versa).
 func (s *Sender) RegisterCommandScopes(ctx context.Context, ownerID int64) error {
-	publicCmds := []BotCommand{
-		{Command: "journal", Description: "Catat trade (guided flow)"},
-		{Command: "open", Description: "Lihat & tutup trade yang masih OPEN"},
-		{Command: "history", Description: "Riwayat trade (Edit & Hapus)"},
-		{Command: "undo", Description: "Hapus 1 trade terakhir"},
-		{Command: "stats", Description: "Statistik trading (all/week/month)"},
-		{Command: "leaderboard", Description: "Top 10 trader komunitas"},
-		{Command: "profile", Description: "Profil level, XP & streak"},
-		{Command: "badges", Description: "Koleksi badge pencapaian"},
-		{Command: "challenge", Description: "Weekly challenge & klasemen"},
-		{Command: "goal", Description: "Target bulanan & progress"},
-		{Command: "reminder", Description: "Atur pengingat jurnal harian"},
-		{Command: "analyze", Description: "Analisis trading dengan AI"},
-		{Command: "reportcard", Description: "Rapor bulanan trader"},
-		{Command: "export", Description: "Export jurnal ke CSV/PDF"},
-		{Command: "report", Description: "Ringkasan mingguan komunitas"},
-		{Command: "help", Description: "Panduan penggunaan bot"},
-	}
+	publicCmds, ownerCmds := CommandMenus()
+
 	if err := s.SetMyCommands(ctx, publicCmds, map[string]interface{}{"type": "default"}); err != nil {
 		return err
 	}
-	if ownerID > 0 {
-		ownerCmds := append([]BotCommand{}, publicCmds...)
-		ownerCmds = append(ownerCmds, BotCommand{
-			Command:     "reset",
-			Description: "Reset semua data BadgerDB & Notion (Owner Only)",
-		})
-		_ = s.SetMyCommands(ctx, ownerCmds, map[string]interface{}{
+	if ownerID > 0 && len(ownerCmds) > 0 {
+		scoped := append(append([]BotCommand{}, publicCmds...), ownerCmds...)
+		_ = s.SetMyCommands(ctx, scoped, map[string]interface{}{
 			"type":    "chat",
 			"chat_id": ownerID,
 		})

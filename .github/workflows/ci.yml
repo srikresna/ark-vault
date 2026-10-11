@@ -59,11 +59,11 @@ jobs:
           path: coverage.html
           retention-days: 7
 
-      - name: Report coverage
+      - name: Enforce coverage threshold
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
           echo "Total coverage: $COVERAGE%"
-          # Current coverage baseline tracking - will set threshold after initial measurement
+          awk -v cov="$COVERAGE" 'BEGIN { if (cov + 0 < 40.0) { printf "Coverage %.1f%% is below minimum threshold 40.0%%\n", cov; exit 1 } }'
 
   build:
     name: Build Binary

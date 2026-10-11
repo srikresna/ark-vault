@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // ImageRepo implements ports.ImageStore by appending image blocks to Notion pages.
@@ -78,10 +80,15 @@ func (r *ImageRepo) Upload(ctx context.Context, pageID string, filename string, 
 
 // parseDate parses a Notion date string.
 func parseDate(s string) (time.Time, error) {
+	// A bare date is a WIB calendar day (that is how buildTradeProperties
+	// writes it); parsing it as UTC would shift it by seven hours and make
+	// round-tripped trades fall outside their own week/month boundaries.
+	if t, err := time.ParseInLocation("2006-01-02", s, timeutil.WIB); err == nil {
+		return t, nil
+	}
 	layouts := []string{
 		"2006-01-02T15:04:05.000Z",
 		"2006-01-02T15:04:05Z",
-		"2006-01-02",
 	}
 	for _, layout := range layouts {
 		if t, err := time.Parse(layout, s); err == nil {

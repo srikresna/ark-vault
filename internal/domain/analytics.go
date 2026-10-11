@@ -7,6 +7,7 @@ type TradeAnalytics struct {
 	TelegramID int64     `json:"telegram_id"`
 	GeneratedAt time.Time `json:"generated_at"`
 	ExpiresAt   time.Time `json:"expires_at"` // 24h cache
+	SourceHash  string    `json:"source_hash,omitempty"`
 
 	// Statistical summary
 	TotalTrades int     `json:"total_trades"`
@@ -27,6 +28,7 @@ type MonthlyReportCard struct {
 	TelegramID  int64     `json:"telegram_id"`
 	YearMonth   string    `json:"year_month"` // "2026-03"
 	GeneratedAt time.Time `json:"generated_at"`
+	SourceHash  string    `json:"source_hash,omitempty"`
 
 	// Stats
 	TotalTrades int     `json:"total_trades"`

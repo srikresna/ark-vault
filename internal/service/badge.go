@@ -3,13 +3,21 @@ package service
 import (
 	"context"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // BadgeService checks badge conditions and awards badges.
+//
+// Concurrency: see GamificationService for the lock-ordering rationale. Badge
+// awards additionally use the store's atomic claim when available, because the
+// check ("has this badge?") and the award are two separate storage calls and
+// two concurrent handlers would otherwise both award the badge and its XP.
 type BadgeService struct {
+	mu     sync.Mutex
 	store  BadgeStore
 	trades TradeRepository
 	gamSvc *GamificationService
@@ -24,9 +32,32 @@ func NewBadgeService(store BadgeStore, trades TradeRepository, gamSvc *Gamificat
 	}
 }
 
+// claimOrAward awards the badge and reports whether this call performed the
+// award. Stores implementing BadgeClaimer do the check-and-write atomically;
+// other stores fall back to a plain check-then-award.
+func (s *BadgeService) claimOrAward(ctx context.Context, award *domain.BadgeAward) (bool, error) {
+	if claimer, ok := s.store.(BadgeClaimer); ok {
+		return claimer.ClaimBadge(ctx, award)
+	}
+	has, err := s.store.HasBadge(ctx, award.TelegramID, award.BadgeID)
+	if err != nil {
+		return false, err
+	}
+	if has {
+		return false, nil
+	}
+	if err := s.store.AwardBadge(ctx, award); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // CheckAndAwardBadges checks all badge conditions after a trade is recorded.
 // Returns newly awarded badges.
 func (s *BadgeService) CheckAndAwardBadges(ctx context.Context, memberID int64, trade *domain.Trade, streak *domain.StreakData) ([]domain.BadgeAward, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	// 1. Get all trades for this member.
 	trades, err := s.trades.GetTrades(ctx, memberID)
 	if err != nil {
@@ -67,8 +98,8 @@ func (s *BadgeService) CheckAndAwardBadges(ctx context.Context, memberID int64, 
 	}
 
 	// 4. Calculate monthly RR (current month in WIB).
-	now := time.Now().In(wib)
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, wib)
+	now := time.Now().In(timeutil.WIB)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, timeutil.WIB)
 	var monthRR float64
 	for _, t := range trades {
 		if !t.Date.Before(monthStart) {
@@ -102,21 +133,17 @@ func (s *BadgeService) CheckAndAwardBadges(ctx context.Context, memberID int64, 
 			continue
 		}
 
-		has, err := s.store.HasBadge(ctx, memberID, chk.id)
-		if err != nil {
-			return nil, err
-		}
-		if has {
-			continue
-		}
-
 		award := &domain.BadgeAward{
 			TelegramID: memberID,
 			BadgeID:    chk.id,
 			AwardedAt:  now,
 		}
-		if err := s.store.AwardBadge(ctx, award); err != nil {
+		claimed, err := s.claimOrAward(ctx, award)
+		if err != nil {
 			return nil, err
+		}
+		if !claimed {
+			continue
 		}
 
 		// Award XP for earning a badge.
@@ -138,22 +165,20 @@ func (s *BadgeService) GetBadges(ctx context.Context, memberID int64) ([]domain.
 // AwardGoalBadge awards the goal_achiever badge to a member.
 // Returns the award if newly granted, or nil if already earned.
 func (s *BadgeService) AwardGoalBadge(ctx context.Context, memberID int64) (*domain.BadgeAward, error) {
-	has, err := s.store.HasBadge(ctx, memberID, domain.BadgeGoalAchiever)
-	if err != nil {
-		return nil, err
-	}
-	if has {
-		return nil, nil
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	now := time.Now().In(wib)
 	award := &domain.BadgeAward{
 		TelegramID: memberID,
 		BadgeID:    domain.BadgeGoalAchiever,
-		AwardedAt:  now,
+		AwardedAt:  time.Now().In(timeutil.WIB),
 	}
-	if err := s.store.AwardBadge(ctx, award); err != nil {
+	claimed, err := s.claimOrAward(ctx, award)
+	if err != nil {
 		return nil, err
+	}
+	if !claimed {
+		return nil, nil
 	}
 	if _, err := s.gamSvc.AwardXP(ctx, memberID, domain.XPBadgeEarned, "badge:goal_achiever"); err != nil {
 		return nil, err
@@ -164,22 +189,20 @@ func (s *BadgeService) AwardGoalBadge(ctx context.Context, memberID int64) (*dom
 // AwardChallengeBadge awards the challenge_winner badge to a member.
 // Returns the award if newly granted, or nil if already earned.
 func (s *BadgeService) AwardChallengeBadge(ctx context.Context, memberID int64) (*domain.BadgeAward, error) {
-	has, err := s.store.HasBadge(ctx, memberID, domain.BadgeChallengeWin)
-	if err != nil {
-		return nil, err
-	}
-	if has {
-		return nil, nil
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	now := time.Now().In(wib)
 	award := &domain.BadgeAward{
 		TelegramID: memberID,
 		BadgeID:    domain.BadgeChallengeWin,
-		AwardedAt:  now,
+		AwardedAt:  time.Now().In(timeutil.WIB),
 	}
-	if err := s.store.AwardBadge(ctx, award); err != nil {
+	claimed, err := s.claimOrAward(ctx, award)
+	if err != nil {
 		return nil, err
+	}
+	if !claimed {
+		return nil, nil
 	}
 	if _, err := s.gamSvc.AwardXP(ctx, memberID, domain.XPBadgeEarned, "badge:challenge_winner"); err != nil {
 		return nil, err

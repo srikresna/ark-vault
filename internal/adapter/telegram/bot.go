@@ -7,10 +7,19 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
+	"sync"
 	"time"
 )
 
 const telegramAPI = "https://api.telegram.org/bot"
+
+const (
+	// maxConcurrentUpdates bounds the number of updates processed concurrently so
+	// a burst of messages cannot spawn unbounded goroutines or exhaust memory.
+	maxConcurrentUpdates = 32
+	shutdownDrainTimeout = 10 * time.Second
+)
 
 // Bot manages the Telegram bot lifecycle (long polling).
 type Bot struct {
@@ -34,24 +43,67 @@ func NewBot(token string, handler *Handler, logger *slog.Logger) *Bot {
 // Start begins the long-polling loop. Blocks until ctx is cancelled.
 func (b *Bot) Start(ctx context.Context) error {
 	b.logger.Info("starting telegram bot polling")
-	for {
+	sem := make(chan struct{}, maxConcurrentUpdates)
+	var wg sync.WaitGroup
+
+	defer func() {
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
 		select {
-		case <-ctx.Done():
+		case <-done:
+		case <-time.After(shutdownDrainTimeout):
+			b.logger.Warn("timed out waiting for in-flight updates to drain")
+		}
+	}()
+
+	for {
+		if ctx.Err() != nil {
 			b.logger.Info("bot polling stopped")
 			return ctx.Err()
-		default:
-			updates, err := b.getUpdates(ctx)
-			if err != nil {
-				b.logger.Error("get updates failed", "error", err)
-				time.Sleep(2 * time.Second)
-				continue
+		}
+		updates, err := b.getUpdates(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				b.logger.Info("bot polling stopped")
+				return ctx.Err()
 			}
-			for _, u := range updates {
-				if u.UpdateID >= b.offset {
-					b.offset = u.UpdateID + 1
-				}
-				go b.handler.HandleUpdate(ctx, u)
+			b.logger.Error("get updates failed", "error", err)
+			select {
+			case <-ctx.Done():
+				b.logger.Info("bot polling stopped")
+				return ctx.Err()
+			case <-time.After(2 * time.Second):
 			}
+			continue
+		}
+		for _, u := range updates {
+			if u.UpdateID >= b.offset {
+				b.offset = u.UpdateID + 1
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				b.logger.Info("bot polling stopped")
+				return ctx.Err()
+			}
+			wg.Add(1)
+			go func(update Update) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				defer func() {
+					if r := recover(); r != nil {
+						b.logger.Error("panic in update worker",
+							"update_id", update.UpdateID,
+							"panic", r,
+							"stack", string(debug.Stack()),
+						)
+					}
+				}()
+				b.handler.HandleUpdate(ctx, update)
+			}(u)
 		}
 	}
 }

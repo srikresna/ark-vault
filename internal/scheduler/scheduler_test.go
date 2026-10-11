@@ -95,3 +95,39 @@ func TestStart(t *testing.T) {
 		t.Errorf("expected runCount >= 1, got %d", count)
 	}
 }
+
+// TestScheduler_RecoversFromJobPanic verifies that a panic inside one job is
+// caught and logged rather than crashing the entire process, and subsequent
+// ticks still run.
+func TestScheduler_RecoversFromJobPanic(t *testing.T) {
+	s := NewScheduler(testLogger())
+
+	var calls int64
+	secondTick := make(chan struct{}, 1)
+
+	s.Add(Job{
+		Name:     "panicking-job",
+		Interval: 10 * time.Millisecond,
+		Run: func(_ context.Context) error {
+			n := atomic.AddInt64(&calls, 1)
+			if n == 1 {
+				panic("boom")
+			}
+			select {
+			case secondTick <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Start(ctx)
+
+	select {
+	case <-secondTick:
+	case <-time.After(1 * time.Second):
+		t.Fatal("scheduler did not recover and continue after job panic")
+	}
+}

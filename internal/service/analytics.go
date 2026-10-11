@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -28,13 +30,7 @@ func NewAnalyticsService(cache AnalyticsCacheStore, ai AIAnalyzer, trades TradeR
 // GetAnalytics returns AI-powered analytics for a member's trades.
 // Results are cached for 24 hours.
 func (s *AnalyticsService) GetAnalytics(ctx context.Context, telegramID int64) (*domain.TradeAnalytics, error) {
-	// Check cache first
-	cached, err := s.cache.GetAnalyticsCache(ctx, telegramID)
-	if err == nil && cached != nil && time.Now().Before(cached.ExpiresAt) {
-		return cached, nil
-	}
-
-	// Fetch trades
+	// Fetch trades first so the cache can be validated against the current trade fingerprint.
 	trades, err := s.trades.GetTrades(ctx, telegramID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get trades: %w", err)
@@ -43,6 +39,12 @@ func (s *AnalyticsService) GetAnalytics(ctx context.Context, telegramID int64) (
 		return nil, fmt.Errorf("belum ada trade untuk dianalisis")
 	}
 
+	sourceHash := hashTrades(trades)
+	cached, err := s.cache.GetAnalyticsCache(ctx, telegramID)
+	if err == nil && cached != nil && time.Now().Before(cached.ExpiresAt) &&
+		cached.SourceHash != "" && cached.SourceHash == sourceHash {
+		return cached, nil
+	}
 	// Calculate basic stats
 	var wins, losses, breakEvens int
 	var totalRR float64
@@ -84,6 +86,7 @@ func (s *AnalyticsService) GetAnalytics(ctx context.Context, telegramID int64) (
 	analytics.TelegramID = telegramID
 	analytics.GeneratedAt = now
 	analytics.ExpiresAt = now.Add(24 * time.Hour)
+	analytics.SourceHash = sourceHash
 	analytics.TotalTrades = total
 	analytics.WinRate = winRate
 	analytics.TotalRR = totalRR
@@ -93,6 +96,26 @@ func (s *AnalyticsService) GetAnalytics(ctx context.Context, telegramID int64) (
 	_ = s.cache.SaveAnalyticsCache(ctx, analytics)
 
 	return analytics, nil
+}
+
+// hashTrades returns a deterministic SHA-256 fingerprint of a trade slice so
+// any addition, edit, status change, or deletion invalidates cached AI output.
+func hashTrades(trades []domain.Trade) string {
+	h := sha256.New()
+	for _, t := range trades {
+		_, _ = fmt.Fprintf(h, "%s|%d|%s|%s|%s|%.6f|%s|%s|%s\n",
+			t.ID,
+			t.Date.UnixNano(),
+			t.Symbol,
+			t.Direction,
+			t.Status,
+			t.ResultRR,
+			t.TimeWindow,
+			t.Confluence,
+			t.Notes,
+		)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // buildAnalyticsPrompt creates a prompt summarising the trader's data.

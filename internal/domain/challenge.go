@@ -3,6 +3,8 @@ package domain
 import (
 	"fmt"
 	"time"
+
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // ChallengeType defines what's being competed on.
@@ -25,15 +27,6 @@ type WeeklyChallenge struct {
 	EndDate     time.Time     `json:"end_date"`
 	Finalized   bool          `json:"finalized"`
 }
-
-// ChallengeEntry tracks one member's participation in a challenge.
-type ChallengeEntry struct {
-	YearWeek   string  `json:"year_week"`
-	TelegramID int64   `json:"telegram_id"`
-	Username   string  `json:"username"`
-	Value      float64 `json:"value"` // trades count, RR, or win rate
-}
-
 // ChallengeResult holds the final standings after a challenge is finalized.
 type ChallengeResult struct {
 	Rank       int     `json:"rank"`
@@ -55,7 +48,11 @@ var ChallengeTemplates = []struct {
 }
 
 // YearWeekString returns the ISO year-week string for a time.
+//
+// t is normalised to WIB first: ISOWeek() uses t's own location, so a caller
+// passing UTC would derive a different week key around the Sunday/Monday
+// boundary and create or look up the wrong challenge.
 func YearWeekString(t time.Time) string {
-	year, week := t.ISOWeek()
+	year, week := t.In(timeutil.WIB).ISOWeek()
 	return fmt.Sprintf("%d-W%02d", year, week)
 }

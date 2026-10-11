@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // Stats holds computed statistics for a single member.
@@ -198,15 +200,14 @@ func CalculateStats(trades []Trade) Stats {
 }
 
 // FilterTradesByPeriod filters trades by "week", "month", or "all" relative to now.
+//
+// now is normalised to WIB before any boundary is derived, so the period is
+// always the user's calendar week/month regardless of the caller's location.
 func FilterTradesByPeriod(trades []Trade, period string, now time.Time) []Trade {
+	now = now.In(timeutil.WIB)
 	switch strings.ToLower(strings.TrimSpace(period)) {
 	case "week", "weekly":
-		weekday := int(now.Weekday())
-		if weekday == 0 {
-			weekday = 7
-		}
-		monday := now.AddDate(0, 0, -(weekday - 1))
-		start := time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, now.Location())
+		start := timeutil.StartOfWeek(now)
 		var out []Trade
 		for _, t := range trades {
 			if !t.Date.Before(start) {
@@ -215,7 +216,7 @@ func FilterTradesByPeriod(trades []Trade, period string, now time.Time) []Trade 
 		}
 		return out
 	case "month", "monthly":
-		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, timeutil.WIB)
 		var out []Trade
 		for _, t := range trades {
 			if !t.Date.Before(start) {
@@ -228,10 +229,11 @@ func FilterTradesByPeriod(trades []Trade, period string, now time.Time) []Trade 
 	}
 }
 
-// ConsecutiveLossesToday counts consecutive LOSS trades recorded on the same day as now (from most recent).
+// ConsecutiveLossesToday counts consecutive LOSS trades recorded on the same WIB day as now (from most recent).
 func ConsecutiveLossesToday(trades []Trade, now time.Time) int {
+	now = now.In(timeutil.WIB)
 	dayStr := now.Format("2006-01-02")
-	loc := now.Location()
+	loc := timeutil.WIB
 
 	var todayTrades []Trade
 	for _, t := range trades {

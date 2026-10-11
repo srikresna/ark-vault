@@ -62,3 +62,33 @@ func (r *BadgeRepo) HasBadge(_ context.Context, telegramID int64, badgeID domain
 func (r *BadgeRepo) AwardBadge(_ context.Context, award *domain.BadgeAward) error {
 	return r.store.Set(badgeKey(award.TelegramID, award.BadgeID), award)
 }
+
+// ClaimBadge awards a badge only if it has not been awarded yet, and reports
+// whether this call performed the award.
+//
+// The existence check and the write happen inside a single Badger transaction.
+// Doing HasBadge followed by AwardBadge as two separate calls is a TOCTOU race:
+// two concurrent handlers (the bot runs one goroutine per Telegram update) can
+// both observe "not awarded" and both award the badge and its XP.
+func (r *BadgeRepo) ClaimBadge(_ context.Context, award *domain.BadgeAward) (bool, error) {
+	data, err := json.Marshal(award)
+	if err != nil {
+		return false, err
+	}
+	claimed := false
+	err = r.store.db.Update(func(txn *badgerdb.Txn) error {
+		key := []byte(badgeKey(award.TelegramID, award.BadgeID))
+		switch _, err := txn.Get(key); {
+		case err == nil:
+			return nil // already awarded by someone else
+		case err != badgerdb.ErrKeyNotFound:
+			return err
+		}
+		if err := txn.Set(key, data); err != nil {
+			return err
+		}
+		claimed = true
+		return nil
+	})
+	return claimed, err
+}

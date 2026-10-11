@@ -18,18 +18,11 @@ import (
 	"github.com/arkcode369/ark-vault/internal/config"
 	"github.com/arkcode369/ark-vault/internal/domain"
 	"github.com/arkcode369/ark-vault/internal/scheduler"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 	"github.com/arkcode369/ark-vault/internal/service"
 )
 
-var wib *time.Location
-
-func init() {
-	var err error
-	wib, err = time.LoadLocation("Asia/Jakarta")
-	if err != nil {
-		wib = time.FixedZone("WIB", 7*3600)
-	}
-}
+var version = "dev"
 
 func main() {
 	// Config
@@ -77,7 +70,7 @@ func main() {
 	leaderboardSvc := service.NewLeaderboardService(tradeRepo, memberRepo)
 	reportSvc := service.NewReportService(tradeRepo, memberRepo)
 	gamRepo := badgerdb.NewGamificationRepo(store)
-	gamSvc := service.NewGamificationService(gamRepo, tradeRepo, memberRepo)
+	gamSvc := service.NewGamificationService(gamRepo)
 
 	// Badge & Challenge services
 	badgeRepo := badgerdb.NewBadgeRepo(store)
@@ -161,7 +154,7 @@ func main() {
 			Name:     "weekly-report",
 			Interval: 1 * time.Hour, // check hourly
 			Run: func(ctx context.Context) error {
-				now := time.Now().In(wib)
+				now := time.Now().In(timeutil.WIB)
 				dayMatch := isDayOfWeek(now, cfg.ReportDay)
 				hourMatch := now.Hour() == cfg.ReportHour
 				if dayMatch && hourMatch && sched.MarkAndCheck("weekly-report", now) {
@@ -179,7 +172,7 @@ func main() {
 		Name:     "challenge-finalize",
 		Interval: 1 * time.Hour,
 		Run: func(ctx context.Context) error {
-			now := time.Now().In(wib)
+			now := time.Now().In(timeutil.WIB)
 			// Finalize on Sunday at report hour
 			if now.Weekday() == time.Sunday && now.Hour() == cfg.ReportHour && sched.MarkAndCheck("challenge-finalize", now) {
 				yearWeek := domain.YearWeekString(now)
@@ -203,7 +196,7 @@ func main() {
 		Name:     "challenge-announce",
 		Interval: 1 * time.Hour,
 		Run: func(ctx context.Context) error {
-			now := time.Now().In(wib)
+			now := time.Now().In(timeutil.WIB)
 			// Announce on Monday at configured report hour (WIB)
 			if now.Weekday() == time.Monday && now.Hour() == cfg.ReportHour && sched.MarkAndCheck("challenge-announce", now) {
 				challenge, err := challengeSvc.GetOrCreateChallenge(ctx, now)
@@ -223,7 +216,7 @@ func main() {
 		Name:     "daily-reminder",
 		Interval: 1 * time.Hour,
 		Run: func(ctx context.Context) error {
-			now := time.Now().In(wib)
+			now := time.Now().In(timeutil.WIB)
 			if !sched.MarkAndCheck("daily-reminder", now) {
 				return nil
 			}
@@ -256,7 +249,7 @@ func main() {
 			if reportCardSvc == nil {
 				return nil
 			}
-			now := time.Now().In(wib)
+			now := time.Now().In(timeutil.WIB)
 			// Generate on 1st of month at report hour
 			if now.Day() == 1 && now.Hour() == cfg.ReportHour && sched.MarkAndCheck("monthly-report-card", now) {
 				lastMonth := now.AddDate(0, -1, 0).Format("2006-01")
@@ -286,7 +279,7 @@ func main() {
 	go sched.Start(ctx)
 	logger.Info("scheduler started")
 
-	logger.Info("ark-vault bot starting")
+	logger.Info("ark-vault bot starting", "version", version)
 	if err := bot.Start(ctx); err != nil && err != context.Canceled {
 		logger.Error("bot stopped with error", "error", err)
 		os.Exit(1)

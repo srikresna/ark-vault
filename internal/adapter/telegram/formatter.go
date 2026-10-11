@@ -152,60 +152,7 @@ func FormatTradeConfirmation(t *domain.Trade) string {
 	return sb.String()
 }
 
-// FormatHelp returns the public /help message.
-func FormatHelp() string {
-	return FormatHelpForUser(false)
-}
-
-// FormatHelpForUser returns the /help message, showing owner-only commands only when isOwner is true.
-func FormatHelpForUser(isOwner bool) string {
-	help := `🔐 <b>ARK Vault — Help</b>
-
-<b>Mencatat &amp; Kelola Trade:</b>
-• /journal — Guided flow (step-by-step dengan tombol)
-• /open — Lihat &amp; tutup trade yang masih OPEN
-• /history — Riwayat trade (bisa Edit &amp; Hapus trade mana saja)
-• /undo — Hapus 1 trade terakhir yang baru diinput
-• Kirim pesan dengan format:
-<pre>#journal
-Pair: XAUUSD
-Type: BUY
-RR: +2
-Session: London
-Confluence: FVG + OB mitigation on 15m</pre>
-  Bisa attach screenshot bersamaan.
-
-<b>Statistik &amp; Ranking:</b>
-• /stats [week|month] — Statistik personal
-• /stats @user [week|month] — Statistik member lain
-• /leaderboard [week|month] — Top 10 (win rate)
-• /leaderboard [week|month] rr — Top 10 (total RR)
-<b>Export &amp; Report:</b>
-• /export — Export journal (CSV)
-• /export pdf — Export journal (PDF)
-• /report — Summary report minggu ini
-
-<b>Lainnya:</b>
-• /profile — Profil &amp; level gamifikasi
-• /badges — Koleksi badge
-• /challenge — Weekly challenge &amp; standings
-• /reminder — Atur daily reminder
-• /goal — Monthly goal &amp; progress
-• /analyze — AI trade analytics
-• /reportcard — Monthly report card
-• /help — Tampilkan pesan ini
-
-<b>Tips:</b>
-• RR bisa: +2, -1, 0 (BE), atau WIN 2RR, LOSS 1RR, BE
-• Kalau RR kosong, trade dicatat sebagai OPEN
-• Session: Asia, London, NY AM, NY PM`
-	if isOwner {
-		help += "\n\n<b>Owner Only:</b>\n• /reset — Reset semua data BadgerDB &amp; Notion"
-	}
-	return help
-}
-
-// FormatWeeklySummary formats a weekly community report as HTML.
+// FormatReminderHelp renders the /reminder usage message.
 func FormatWeeklySummary(s *service.WeeklySummary) string {
 	var sb strings.Builder
 	sb.WriteString("📈 <b>ARK Vault — Weekly Report</b>\n")

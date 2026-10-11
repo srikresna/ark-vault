@@ -94,12 +94,12 @@ func (r *TradeRepo) GetTrades(ctx context.Context, memberID int64) ([]domain.Tra
 		},
 	}
 
-	raw, err := r.client.QueryDatabase(ctx, member.NotionDBID, payload)
+	items, err := r.client.QueryDatabaseAll(ctx, member.NotionDBID, payload)
 	if err != nil {
 		return nil, fmt.Errorf("query trades: %w", err)
 	}
 
-	trades, err := r.parseTrades(raw)
+	trades, err := r.parseTrades(items)
 	if err != nil {
 		return nil, err
 	}
@@ -196,17 +196,10 @@ func (r *TradeRepo) buildTradeProperties(t *domain.Trade) map[string]interface{}
 	return props
 }
 
-// parseTrades extracts trades from a Notion database query response.
-func (r *TradeRepo) parseTrades(raw json.RawMessage) ([]domain.Trade, error) {
-	var resp struct {
-		Results []json.RawMessage `json:"results"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, err
-	}
-
-	trades := make([]domain.Trade, 0, len(resp.Results))
-	for _, item := range resp.Results {
+// parseTrades extracts trades from Notion database query results.
+func (r *TradeRepo) parseTrades(items []json.RawMessage) ([]domain.Trade, error) {
+	trades := make([]domain.Trade, 0, len(items))
+	for _, item := range items {
 		t, err := r.parseSingleTrade(item)
 		if err != nil {
 			continue // skip malformed entries

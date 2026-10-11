@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // ReminderService manages daily reminder preferences and due-reminder queries.
@@ -54,7 +55,7 @@ func (s *ReminderService) GetDueReminders(ctx context.Context) ([]domain.Reminde
 		return nil, err
 	}
 
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 	currentHour := now.Hour()
 	today := now.Format("2006-01-02")
 

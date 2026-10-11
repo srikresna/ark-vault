@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 type mockGamificationStore struct {
@@ -162,16 +164,14 @@ func TestLevelForXP_HardcoreThresholds(t *testing.T) {
 
 func TestGamificationService_DailyTradeXPCap(t *testing.T) {
 	store := newMockGamificationStore()
-	tradesRepo := newMockGamificationTradeRepo()
-	membersRepo := newMockGamificationMemberRepo()
-	svc := NewGamificationService(store, tradesRepo, membersRepo)
+	svc := NewGamificationService(store)
 
 	ctx := context.Background()
 	memberID := int64(12345)
 
 	trade := &domain.Trade{
 		ID:       "trade-1",
-		Date:     time.Now().In(wib),
+		Date:     time.Now().In(timeutil.WIB),
 		Symbol:   "XAUUSD",
 		Status:   domain.StatusWin,
 		ResultRR: 2.5,
@@ -205,9 +205,7 @@ func TestGamificationService_DailyTradeXPCap(t *testing.T) {
 
 func TestGamificationService_AdjustXPForTradeChange(t *testing.T) {
 	store := newMockGamificationStore()
-	tradesRepo := newMockGamificationTradeRepo()
-	membersRepo := newMockGamificationMemberRepo()
-	svc := NewGamificationService(store, tradesRepo, membersRepo)
+	svc := NewGamificationService(store)
 
 	ctx := context.Background()
 	memberID := int64(777)
@@ -295,7 +293,7 @@ func TestReportCardService_InvalidatesCacheOnTradeChange(t *testing.T) {
 
 	ctx := context.Background()
 	uid := int64(55)
-	dt := time.Date(2026, 3, 15, 10, 0, 0, 0, wib)
+	dt := time.Date(2026, 3, 15, 10, 0, 0, 0, timeutil.WIB)
 	tradesRepo.trades[uid] = []domain.Trade{
 		{ID: "1", Date: dt, Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 2.0},
 	}
@@ -328,13 +326,28 @@ func TestReportCardService_InvalidatesCacheOnTradeChange(t *testing.T) {
 	if rc2.TotalTrades != 2 || rc2.TotalRR != 1.0 || ai.calls != 2 {
 		t.Fatalf("expected regenerated report with 2 trades, +1.0R, 2 AI calls; got %+v calls=%d", rc2, ai.calls)
 	}
+
+	// Level/XP change with unchanged trades -> cache invalidated via SourceHash
+	_ = gamStore.SaveProfile(ctx, &domain.GamificationProfile{
+		TelegramID: uid,
+		TotalXP:    1200,
+		Level:      4,
+		Title:      "Quant",
+	})
+	rc3, err := svc.GenerateMonthlyReport(ctx, uid, "2026-03")
+	if err != nil {
+		t.Fatalf("fourth GenerateMonthlyReport failed: %v", err)
+	}
+	if rc3.Level != 4 || rc3.Title != "Quant" || ai.calls != 3 {
+		t.Fatalf("expected regenerated report card with Level=4 Quant and 3 AI calls; got %+v calls=%d", rc3, ai.calls)
+	}
 }
 
 func TestLeaderboardService_MinTradesExcludesOpenTrades(t *testing.T) {
 	tradesRepo := newMockGamificationTradeRepo()
 	membersRepo := newMockGamificationMemberRepo()
 	ctx := context.Background()
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 
 	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 1, Username: "openonly"})
 	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 2, Username: "closedtrader"})
@@ -369,7 +382,7 @@ func TestAnalyticsService_AvgRRExcludesOpenTrades(t *testing.T) {
 	ai := &mockAIAnalyzer{}
 	ctx := context.Background()
 	uid := int64(88)
-	now := time.Now().In(wib)
+	now := time.Now().In(timeutil.WIB)
 
 	tradesRepo.trades[uid] = []domain.Trade{
 		{Date: now, Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 3.0},
@@ -384,7 +397,64 @@ func TestAnalyticsService_AvgRRExcludesOpenTrades(t *testing.T) {
 		t.Fatalf("GetAnalytics failed: %v", err)
 	}
 	// 2 closed trades with totalRR = +2.0 -> avgRR should be 1.0, not 0.5
-	if res.AvgRR != 1.0 {
-		t.Fatalf("expected AvgRR = 1.0 over 2 closed trades, got %v", res.AvgRR)
+	if res.AvgRR != 1.0 || ai.calls != 1 {
+		t.Fatalf("expected AvgRR = 1.0 over 2 closed trades and 1 AI call, got %v calls=%d", res.AvgRR, ai.calls)
+	}
+
+	// Unchanged trades -> served from cache without calling AI again
+	if _, err := svc.GetAnalytics(ctx, uid); err != nil || ai.calls != 1 {
+		t.Fatalf("expected cached analytics hit without extra AI call, got err=%v calls=%d", err, ai.calls)
+	}
+
+	// Trade modified -> SourceHash changes so cache is invalidated even within 24h TTL
+	tradesRepo.trades[uid][0].ResultRR = 5.0
+	res2, err := svc.GetAnalytics(ctx, uid)
+	if err != nil {
+		t.Fatalf("GetAnalytics after trade edit failed: %v", err)
+	}
+	if res2.AvgRR != 2.0 || ai.calls != 2 {
+		t.Fatalf("expected regenerated analytics with AvgRR=2.0 and 2 AI calls, got %v calls=%d", res2.AvgRR, ai.calls)
+	}
+}
+
+// TestGamificationService_ConcurrentTradesRespectDailyCapAndPreserveXP verifies
+// that concurrent OnTradeRecorded calls for the same member are serialised so
+// the daily trade XP cap (MaxDailyTradeXPCount=3) cannot be bypassed by a
+// read-modify-write race and no XP updates are lost.
+func TestGamificationService_ConcurrentTradesRespectDailyCapAndPreserveXP(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	uid := int64(777)
+	trade := &domain.Trade{
+		Date:      time.Now().In(timeutil.WIB),
+		Symbol:    "XAUUSD",
+		Direction: domain.DirBuy,
+		Status:    domain.StatusLoss,
+		ResultRR:  -1.0,
+	}
+
+	const workers = 6
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			if _, err := svc.OnTradeRecorded(ctx, uid, trade); err != nil {
+				t.Errorf("OnTradeRecorded failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Expected XP: 3 capped trades * XPTradeLogged (10) + 1 daily streak increment (15) = 45.
+	wantXP := domain.MaxDailyTradeXPCount*domain.XPTradeLogged + domain.XPDailyStreak
+	prof, err := svc.GetProfile(ctx, uid)
+	if err != nil {
+		t.Fatalf("GetProfile failed: %v", err)
+	}
+	if prof.TotalXP != wantXP {
+		t.Fatalf("TotalXP after %d concurrent trades = %d, want %d", workers, prof.TotalXP, wantXP)
 	}
 }

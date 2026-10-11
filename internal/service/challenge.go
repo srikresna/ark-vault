@@ -4,13 +4,19 @@ import (
 	"context"
 	"math"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // ChallengeService manages weekly challenges.
+//
+// Concurrency: see GamificationService for the lock-ordering rationale
+// (challenge → goal → badge → gamification).
 type ChallengeService struct {
+	mu       sync.Mutex
 	store    ChallengeStore
 	trades   TradeRepository
 	members  MemberRepository
@@ -37,6 +43,10 @@ func NewChallengeService(
 
 // GetOrCreateChallenge gets or creates the weekly challenge for the given week.
 func (s *ChallengeService) GetOrCreateChallenge(ctx context.Context, t time.Time) (*domain.WeeklyChallenge, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	t = t.In(timeutil.WIB)
 	yearWeek := domain.YearWeekString(t)
 
 	existing, err := s.store.GetChallenge(ctx, yearWeek)
@@ -47,21 +57,14 @@ func (s *ChallengeService) GetOrCreateChallenge(ctx context.Context, t time.Time
 		return existing, nil
 	}
 
-	// Rotate through templates based on ISO week number.
+	// Rotate through templates based on ISO week number in WIB.
 	_, week := t.ISOWeek()
 	tmpl := domain.ChallengeTemplates[week%len(domain.ChallengeTemplates)]
 
-	// Calculate Monday (start) and Sunday (end) of the ISO week.
-	// time.ISOWeek considers Monday as day 1.
-	weekday := t.Weekday()
-	if weekday == time.Sunday {
-		weekday = 7
-	}
-	monday := t.AddDate(0, 0, -int(weekday-time.Monday))
-	monday = time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, wib)
+	// Calculate Monday (start) and Sunday (end) of the ISO week in WIB.
+	monday := timeutil.StartOfWeek(t)
 	sunday := monday.AddDate(0, 0, 6)
-	sunday = time.Date(sunday.Year(), sunday.Month(), sunday.Day(), 23, 59, 59, 0, wib)
-
+	sunday = time.Date(sunday.Year(), sunday.Month(), sunday.Day(), 23, 59, 59, 0, timeutil.WIB)
 	challenge := &domain.WeeklyChallenge{
 		YearWeek:    yearWeek,
 		Type:        tmpl.Type,
@@ -155,6 +158,9 @@ func (s *ChallengeService) GetCurrentStandings(ctx context.Context, challenge *d
 
 // FinalizeChallenge finalizes a challenge: compute final standings, award XP/badges.
 func (s *ChallengeService) FinalizeChallenge(ctx context.Context, yearWeek string) ([]domain.ChallengeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	challenge, err := s.store.GetChallenge(ctx, yearWeek)
 	if err != nil {
 		return nil, err
@@ -166,9 +172,16 @@ func (s *ChallengeService) FinalizeChallenge(ctx context.Context, yearWeek strin
 		return nil, nil
 	}
 
-	// Compute final standings.
+	// Compute final standings before marking finalized.
 	results, err := s.GetCurrentStandings(ctx, challenge)
 	if err != nil {
+		return nil, err
+	}
+
+	// Persist Finalized = true BEFORE awarding XP/badges to close the re-award window
+	// if a downstream call fails or a concurrent caller enters.
+	challenge.Finalized = true
+	if err := s.store.SaveChallenge(ctx, challenge); err != nil {
 		return nil, err
 	}
 
@@ -201,12 +214,6 @@ func (s *ChallengeService) FinalizeChallenge(ctx context.Context, yearWeek strin
 		if _, err := s.badgeSvc.AwardChallengeBadge(ctx, results[0].TelegramID); err != nil {
 			return nil, err
 		}
-	}
-
-	// Mark as finalized.
-	challenge.Finalized = true
-	if err := s.store.SaveChallenge(ctx, challenge); err != nil {
-		return nil, err
 	}
 
 	return results, nil
