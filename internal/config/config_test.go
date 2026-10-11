@@ -22,6 +22,7 @@ func clearEnv(t *testing.T) {
 		"GEMINI_API_KEY",
 		"GEMINI_MODEL",
 		"RATE_LIMIT_PER_MIN",
+		"METRICS_ADDR",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -62,6 +63,9 @@ func TestLoad_ValidDefaults(t *testing.T) {
 	}
 	if cfg.RateLimitPerMin != 10 {
 		t.Errorf("expected RateLimitPerMin 10, got %d", cfg.RateLimitPerMin)
+	}
+	if cfg.MetricsAddr != ":9102" {
+		t.Errorf("expected MetricsAddr ':9102', got %q", cfg.MetricsAddr)
 	}
 }
 

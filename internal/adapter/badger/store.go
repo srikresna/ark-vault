@@ -1,7 +1,12 @@
 package badger
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -175,4 +180,59 @@ func (s *Store) Reset() error {
 		}
 	}
 	return nil
+}
+
+// BackupToDir streams a consistent snapshot of the database compressed with
+// gzip into dir, writes it atomically via a temporary file, and prunes older
+// backups so only the keep newest files remain.
+func (s *Store) BackupToDir(dir string, keep int) (string, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("create backup dir: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, "badger-backup-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create temp backup file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath) // cleans up if rename was not reached
+	}()
+
+	gzWriter := gzip.NewWriter(tmpFile)
+	if _, err := s.db.Backup(gzWriter, 0); err != nil {
+		_ = gzWriter.Close()
+		return "", fmt.Errorf("badger backup stream: %w", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		return "", fmt.Errorf("close gzip writer: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return "", fmt.Errorf("close temp file: %w", err)
+	}
+
+	targetName := fmt.Sprintf("badger-%s.bak.gz", time.Now().UTC().Format("20060102-150405"))
+	targetPath := filepath.Join(dir, targetName)
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return "", fmt.Errorf("commit backup file: %w", err)
+	}
+
+	if keep > 0 {
+		s.pruneBackups(dir, keep)
+	}
+
+	return targetPath, nil
+}
+
+func (s *Store) pruneBackups(dir string, keep int) {
+	matches, err := filepath.Glob(filepath.Join(dir, "badger-*.bak.gz"))
+	if err != nil || len(matches) <= keep {
+		return
+	}
+	sort.Strings(matches) // chronological by timestamp in name
+	toRemove := matches[:len(matches)-keep]
+	for _, f := range toRemove {
+		_ = os.Remove(f)
+	}
 }

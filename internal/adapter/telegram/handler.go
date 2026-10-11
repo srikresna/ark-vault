@@ -3,14 +3,15 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/internal/service"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
-	"github.com/arkcode369/ark-vault/internal/domain"
-	"github.com/arkcode369/ark-vault/internal/service"
-	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // Exporter generates downloadable files from trade data.
@@ -42,6 +43,7 @@ type Resetter interface {
 type NotionResetter interface {
 	ResetAll(ctx context.Context) (int, error)
 }
+
 // TradeEditField identifies which trade attribute is awaiting free-text input.
 type TradeEditField string
 
@@ -64,22 +66,27 @@ type TradeEditSession struct {
 
 // Handler routes incoming Telegram updates to the appropriate logic.
 type Handler struct {
-	sender           *Sender
-	bot              *Bot
-	svc              Services
-	exporter         Exporter
-	trades           service.TradeRepository
-	members          service.MemberRepository
-	resetter         Resetter
-	guided           *GuidedFlow
-	editMu           sync.RWMutex
-	editSessions     map[int64]*TradeEditSession
-	limiter          *RateLimiter
-	logger           *slog.Logger
-	communityGroupID int64
-	ownerID          int64
-	unauthMu         sync.Mutex
-	unauthNotified   map[int64]time.Time // per-user last owner-notification time
+	sender                 *Sender
+	bot                    *Bot
+	svc                    Services
+	exporter               Exporter
+	trades                 service.TradeRepository
+	members                service.MemberRepository
+	resetter               Resetter
+	guided                 *GuidedFlow
+	editMu                 sync.RWMutex
+	editSessions           map[int64]*TradeEditSession
+	limiter                *RateLimiter
+	logger                 *slog.Logger
+	communityGroupID       int64
+	ownerID                int64
+	unauthMu               sync.Mutex
+	unauthNotified         map[int64]time.Time // per-user last owner-notification time
+	metricUpdatesTotal     uint64
+	metricCommandsTotal    uint64
+	metricCallbacksTotal   uint64
+	metricRateLimitedTotal uint64
+	metricPanicsTotal      uint64
 }
 
 // NewHandler creates a Handler.
@@ -130,6 +137,26 @@ func (h *Handler) Close() {
 	}
 }
 
+// HandlerMetrics captures operational counters exposed via Prometheus /metrics.
+type HandlerMetrics struct {
+	UpdatesTotal     uint64
+	CommandsTotal    uint64
+	CallbacksTotal   uint64
+	RateLimitedTotal uint64
+	PanicsTotal      uint64
+}
+
+// Metrics returns a snapshot of handler operational counters.
+func (h *Handler) Metrics() HandlerMetrics {
+	return HandlerMetrics{
+		UpdatesTotal:     atomic.LoadUint64(&h.metricUpdatesTotal),
+		CommandsTotal:    atomic.LoadUint64(&h.metricCommandsTotal),
+		CallbacksTotal:   atomic.LoadUint64(&h.metricCallbacksTotal),
+		RateLimitedTotal: atomic.LoadUint64(&h.metricRateLimitedTotal),
+		PanicsTotal:      atomic.LoadUint64(&h.metricPanicsTotal),
+	}
+}
+
 // isAuthorized checks if the user is a member of the community group.
 // If communityGroupID is 0, everyone is authorized.
 // In group chats, non-members are silently ignored (no spam in group).
@@ -156,11 +183,17 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 		}
 		// Notify owner about unauthorized access attempt (at most once per user per hour)
 		if h.ownerID > 0 {
+			now := time.Now()
 			h.unauthMu.Lock()
+			for id, ts := range h.unauthNotified {
+				if now.Sub(ts) > time.Hour {
+					delete(h.unauthNotified, id)
+				}
+			}
 			last, ok := h.unauthNotified[userID]
-			shouldNotify := !ok || time.Since(last) > 1*time.Hour
+			shouldNotify := !ok || now.Sub(last) > time.Hour
 			if shouldNotify {
-				h.unauthNotified[userID] = time.Now()
+				h.unauthNotified[userID] = now
 			}
 			h.unauthMu.Unlock()
 			if shouldNotify {
@@ -176,9 +209,13 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 
 // HandleUpdate processes a single Telegram update.
 func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
+	atomic.AddUint64(&h.metricUpdatesTotal, 1)
 	defer func() {
-		if r := recover(); r != nil && h.logger != nil {
-			h.logger.Error("recovered panic in HandleUpdate", "update_id", u.UpdateID, "panic", r)
+		if r := recover(); r != nil {
+			atomic.AddUint64(&h.metricPanicsTotal, 1)
+			if h.logger != nil {
+				h.logger.Error("recovered panic in HandleUpdate", "update_id", u.UpdateID, "panic", r)
+			}
 		}
 	}()
 	if u.CallbackQuery != nil {
@@ -195,14 +232,14 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 		text = strings.TrimSpace(msg.Caption)
 	}
 
-	// Rate limiting (skip for #journal text which is passive)
-	if msg.From != nil && strings.HasPrefix(text, "/") {
+	// Rate limiting for commands and #journal submissions
+	if msg.From != nil && h.limiter != nil && (strings.HasPrefix(text, "/") || strings.HasPrefix(text, "#journal")) {
 		if !h.limiter.Allow(msg.From.ID) {
+			atomic.AddUint64(&h.metricRateLimitedTotal, 1)
 			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "⏳ Terlalu banyak request. Coba lagi nanti.", msg.MessageThreadID)
 			return
 		}
 	}
-
 	// Community membership gate
 	if msg.From != nil && !h.isAuthorized(ctx, msg.From.ID, msg.Chat.ID, msg.MessageThreadID, msg.Chat.Type) {
 		return
@@ -247,7 +284,7 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 
 	if err := h.svc.Journal.RecordTrade(ctx, msg.From.ID, username, firstName, trade); err != nil {
 		h.logger.Error("record trade failed", "error", err)
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal menyimpan trade: "+err.Error(), msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal menyimpan trade. Silakan coba lagi.", msg.MessageThreadID)
 		return
 	}
 
@@ -256,33 +293,47 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 		h.uploadPhoto(ctx, msg.Photo, trade.ID)
 	}
 
-	revengeWarn := h.checkRevengeWarning(ctx, msg.From.ID, trade)
+	h.notifyTradeRecorded(ctx, msg.From.ID, trade, msg.Chat.ID, msg.MessageThreadID)
+}
+
+// notifyTradeRecorded sends the trade confirmation (with XP/level/streak if
+// gamification is enabled) and evaluates badge and monthly goal rewards.
+func (h *Handler) notifyTradeRecorded(ctx context.Context, userID int64, trade *domain.Trade, chatID int64, threadID int) {
+	revengeWarn := h.checkRevengeWarning(ctx, userID, trade)
 
 	if h.svc.Gamification != nil {
-		gamResult, _ := h.svc.Gamification.OnTradeRecorded(ctx, msg.From.ID, trade)
-		if gamResult != nil {
+		gamResult, err := h.svc.Gamification.OnTradeRecorded(ctx, userID, trade)
+		if err != nil {
+			h.logger.Error("gamification failed", "error", err)
+		} else if gamResult != nil {
 			confirmText := FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak) + revengeWarn
-			_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, confirmText, msg.MessageThreadID)
-			// Check for new badges
-			if h.svc.Badge != nil {
-				streak, _ := h.svc.Gamification.GetStreak(ctx, msg.From.ID)
-				newBadges, _ := h.svc.Badge.CheckAndAwardBadges(ctx, msg.From.ID, trade, streak)
-				if len(newBadges) > 0 {
-					_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatBadgeUnlock(newBadges), msg.MessageThreadID)
-				}
-			}
-			// Check goal completion
-			if h.svc.Goal != nil {
-				achieved, _ := h.svc.Goal.CheckGoalCompletion(ctx, msg.From.ID)
-				if achieved {
-					_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, "\xf0\x9f\x8e\xaf <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", msg.MessageThreadID)
-				}
-			}
+			_, _ = h.sender.SendHTML(ctx, chatID, confirmText, threadID)
+			h.evaluatePostTradeRewards(ctx, userID, trade, chatID, threadID)
 			return
 		}
 	}
-	// fallback to original confirmation
-	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatTradeConfirmation(trade)+revengeWarn, msg.MessageThreadID)
+
+	_, _ = h.sender.SendHTML(ctx, chatID, FormatTradeConfirmation(trade)+revengeWarn, threadID)
+}
+
+// evaluatePostTradeRewards checks badge unlocks and monthly goal completion
+// after a trade is recorded or updated.
+func (h *Handler) evaluatePostTradeRewards(ctx context.Context, userID int64, trade *domain.Trade, chatID int64, threadID int) {
+	if h.svc.Gamification == nil {
+		return
+	}
+	if h.svc.Badge != nil {
+		streak, _ := h.svc.Gamification.GetStreak(ctx, userID)
+		newBadges, _ := h.svc.Badge.CheckAndAwardBadges(ctx, userID, trade, streak)
+		if len(newBadges) > 0 {
+			_, _ = h.sender.SendHTML(ctx, chatID, FormatBadgeUnlock(newBadges), threadID)
+		}
+	}
+	if h.svc.Goal != nil {
+		if achieved, _ := h.svc.Goal.CheckGoalCompletion(ctx, userID); achieved {
+			_, _ = h.sender.SendHTML(ctx, chatID, "🎯 <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", threadID)
+		}
+	}
 }
 
 // cmdJournal starts the guided flow.
@@ -301,16 +352,16 @@ func (h *Handler) cmdJournal(ctx context.Context, msg *Message) {
 	session.MsgID = msgID
 }
 
-// cmdStats shows personal or another member's stats.
+// cmdStats shows personal or another member's stats with optional period, symbol, and session filters.
 func (h *Handler) cmdStats(ctx context.Context, msg *Message, text string) {
 	if msg.From == nil {
 		return
 	}
 	targetID := msg.From.ID
 	targetUsername := msg.From.Username
-	period := "all"
+	filter := domain.StatsFilter{Period: "all"}
 
-	// Supports: /stats, /stats week, /stats month, /stats @username, /stats @username week
+	// Supports: /stats [week|month|all] [@username] [symbol] [asia|london|nyam|nypm]
 	parts := strings.Fields(text)
 	for _, p := range parts[1:] {
 		if strings.HasPrefix(p, "@") {
@@ -322,23 +373,35 @@ func (h *Handler) cmdStats(ctx context.Context, msg *Message, text string) {
 			}
 			targetID = member.TelegramID
 			targetUsername = member.Username
-		} else {
-			switch strings.ToLower(p) {
-			case "week", "weekly":
-				period = "week"
-			case "month", "monthly":
-				period = "month"
-			}
+			continue
+		}
+		switch strings.ToLower(p) {
+		case "week", "weekly":
+			filter.Period = "week"
+		case "month", "monthly":
+			filter.Period = "month"
+		case "all":
+			filter.Period = "all"
+		case "asia":
+			filter.Session = domain.SessionAsia
+		case "london":
+			filter.Session = domain.SessionLondon
+		case "nyam":
+			filter.Session = domain.SessionNYAM
+		case "nypm":
+			filter.Session = domain.SessionNYPM
+		default:
+			filter.Symbol = strings.ToUpper(strings.ReplaceAll(p, "/", ""))
 		}
 	}
 
-	stats, err := h.svc.Journal.GetMemberStatsByPeriod(ctx, targetID, period)
+	stats, err := h.svc.Journal.GetMemberStatsWithFilter(ctx, targetID, filter)
 	if err != nil || stats == nil {
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat untuk periode ini.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade yang tercatat untuk filter ini.", msg.MessageThreadID)
 		return
 	}
 
-	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatStatsWithPeriod(targetUsername, period, stats), msg.MessageThreadID)
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatStatsWithFilter(targetUsername, filter, stats), msg.MessageThreadID)
 }
 
 // findMemberByUsername searches cached members by username.
@@ -376,62 +439,80 @@ func (h *Handler) cmdLeaderboard(ctx context.Context, msg *Message, text string)
 
 	entries, err := h.svc.Leaderboard.GetLeaderboardByPeriod(ctx, metric, period, 10, minTrades)
 	if err != nil {
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Error: "+err.Error(), msg.MessageThreadID)
+		h.logger.Error("leaderboard failed", "error", err)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat leaderboard.", msg.MessageThreadID)
 		return
 	}
 
 	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatLeaderboardWithPeriod(entries, metric, period), msg.MessageThreadID)
 }
 
-// cmdExport exports the member's trades as CSV or PDF.
+// cmdExport exports the member's trades as CSV or PDF with optional period filtering.
 func (h *Handler) cmdExport(ctx context.Context, msg *Message, text string) {
 	if msg.From == nil {
 		return
 	}
-	trades, err := h.trades.GetTrades(ctx, msg.From.ID)
-	if err != nil {
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-export.", msg.MessageThreadID)
-		return
-	}
-	if len(trades) == 0 {
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-export.", msg.MessageThreadID)
-		return
-	}
-
 	if h.exporter == nil {
 		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "⚠️ Export belum tersedia.", msg.MessageThreadID)
 		return
 	}
 
-	// Check if PDF requested: /export pdf
 	format := "csv"
-	parts := strings.Fields(text)
-	if len(parts) > 1 && strings.EqualFold(parts[1], "pdf") {
-		format = "pdf"
+	period := "all"
+	for _, p := range strings.Fields(strings.ToLower(text))[1:] {
+		switch p {
+		case "pdf":
+			format = "pdf"
+		case "csv":
+			format = "csv"
+		case "week", "weekly":
+			period = "week"
+		case "month", "monthly":
+			period = "month"
+		case "all":
+			period = "all"
+		}
+	}
+
+	trades, err := h.trades.GetTrades(ctx, msg.From.ID)
+	if err != nil {
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-export.", msg.MessageThreadID)
+		return
+	}
+	trades = domain.FilterTradesByPeriod(trades, period, time.Now().In(timeutil.WIB))
+	if len(trades) == 0 {
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-export pada periode ini.", msg.MessageThreadID)
+		return
 	}
 
 	username := msg.From.Username
 	if username == "" {
 		username = msg.From.FirstName
 	}
+	suffix := ""
+	if period != "all" {
+		suffix = "_" + period
+	}
 
 	switch format {
 	case "pdf":
-		stats, _ := h.svc.Journal.GetMemberStats(ctx, msg.From.ID)
-		data, err := h.exporter.ExportPDF(ctx, username, trades, stats)
+		computed := domain.CalculateStats(trades)
+		data, err := h.exporter.ExportPDF(ctx, username, trades, &computed)
 		if err != nil {
-			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Export PDF gagal: "+err.Error(), msg.MessageThreadID)
+			h.logger.Error("export pdf failed", "error", err)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Export PDF gagal.", msg.MessageThreadID)
 			return
 		}
-		filename := fmt.Sprintf("journal_%s.pdf", username)
+		filename := fmt.Sprintf("journal_%s%s.pdf", username, suffix)
 		_ = h.sender.SendDocument(ctx, msg.Chat.ID, filename, data, "📊 Export trade journal (PDF)", msg.MessageThreadID)
 	default:
 		data, err := h.exporter.ExportCSV(ctx, trades)
 		if err != nil {
-			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Export CSV gagal: "+err.Error(), msg.MessageThreadID)
+			h.logger.Error("export csv failed", "error", err)
+			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Export CSV gagal.", msg.MessageThreadID)
 			return
 		}
-		filename := fmt.Sprintf("journal_%s.csv", username)
+		filename := fmt.Sprintf("journal_%s%s.csv", username, suffix)
 		_ = h.sender.SendDocument(ctx, msg.Chat.ID, filename, data, "📊 Export trade journal (CSV)", msg.MessageThreadID)
 	}
 }
@@ -443,7 +524,8 @@ func (h *Handler) cmdReport(ctx context.Context, msg *Message) {
 
 	summary, err := h.svc.Report.GenerateWeeklySummary(ctx, weekStart, weekEnd)
 	if err != nil {
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal generate report: "+err.Error(), msg.MessageThreadID)
+		h.logger.Error("weekly report failed", "error", err)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal memuat laporan mingguan.", msg.MessageThreadID)
 		return
 	}
 
@@ -484,8 +566,13 @@ func (h *Handler) handleCallback(ctx context.Context, cb *CallbackQuery) {
 	if cb == nil || cb.From == nil {
 		return
 	}
+	atomic.AddUint64(&h.metricCallbacksTotal, 1)
+	if h.limiter != nil && !h.limiter.Allow(cb.From.ID) {
+		atomic.AddUint64(&h.metricRateLimitedTotal, 1)
+		_ = h.sender.AnswerCallback(ctx, cb.ID, "⏳ Terlalu banyak request. Coba lagi nanti.")
+		return
+	}
 	_ = h.sender.AnswerCallback(ctx, cb.ID, "")
-
 	data := cb.Data
 	if data == "reset:confirm" || data == "reset:cancel" {
 		if h.ownerID == 0 || cb.From.ID != h.ownerID || cb.Message == nil || cb.Message.Chat == nil {
@@ -676,7 +763,7 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 	err := h.svc.Journal.RecordTrade(ctx, from.ID, from.Username, from.FirstName, trade)
 	if err != nil {
 		h.logger.Error("guided submit failed", "error", err)
-		_, _ = h.sender.SendText(ctx, session.ChatID, "❌ Gagal menyimpan: "+err.Error(), session.ThreadID)
+		_, _ = h.sender.SendText(ctx, session.ChatID, "❌ Gagal menyimpan trade. Silakan coba lagi.", session.ThreadID)
 		h.guided.Remove(from.ID)
 		return
 	}
@@ -686,38 +773,7 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 		h.uploadPhoto(ctx, []PhotoSize{{FileID: session.PhotoFileID}}, trade.ID)
 	}
 
-	revengeWarn := h.checkRevengeWarning(ctx, from.ID, trade)
-
-	// After successful trade recording, trigger gamification
-	if h.svc.Gamification != nil {
-		gamResult, err := h.svc.Gamification.OnTradeRecorded(ctx, from.ID, trade)
-		if err != nil {
-			h.logger.Error("gamification failed", "error", err)
-		} else {
-			// Send enhanced confirmation with XP info
-			confirmText := FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak) + revengeWarn
-			_, _ = h.sender.SendHTML(ctx, session.ChatID, confirmText, session.ThreadID)
-			// Check for new badges
-			if h.svc.Badge != nil {
-				streak, _ := h.svc.Gamification.GetStreak(ctx, from.ID)
-				newBadges, _ := h.svc.Badge.CheckAndAwardBadges(ctx, from.ID, trade, streak)
-				if len(newBadges) > 0 {
-					_, _ = h.sender.SendHTML(ctx, session.ChatID, FormatBadgeUnlock(newBadges), session.ThreadID)
-				}
-			}
-			// Check goal completion
-			if h.svc.Goal != nil {
-				achieved, _ := h.svc.Goal.CheckGoalCompletion(ctx, from.ID)
-				if achieved {
-					_, _ = h.sender.SendHTML(ctx, session.ChatID, "\xf0\x9f\x8e\xaf <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", session.ThreadID)
-				}
-			}
-			h.guided.Remove(from.ID)
-			return
-		}
-	}
-
-	_, _ = h.sender.SendHTML(ctx, session.ChatID, FormatTradeConfirmation(trade)+revengeWarn, session.ThreadID)
+	h.notifyTradeRecorded(ctx, from.ID, trade, session.ChatID, session.ThreadID)
 	h.guided.Remove(from.ID)
 }
 
@@ -902,7 +958,11 @@ func (h *Handler) cmdAnalyze(ctx context.Context, msg *Message) {
 	if err != nil {
 		h.logger.Error("analytics failed", "error", err)
 		if waitMsgID > 0 {
-			_ = h.sender.EditMessage(ctx, msg.Chat.ID, waitMsgID, "\u274c Gagal menganalisis: "+err.Error())
+			errMsg := "❌ Gagal menganalisis trade. Silakan coba lagi nanti."
+			if strings.Contains(err.Error(), "belum ada trade") {
+				errMsg = "📭 Belum ada trade untuk dianalisis."
+			}
+			_ = h.sender.EditMessage(ctx, msg.Chat.ID, waitMsgID, errMsg)
 		}
 		return
 	}
@@ -937,7 +997,7 @@ func (h *Handler) cmdReportCard(ctx context.Context, msg *Message) {
 	if err != nil {
 		h.logger.Error("report card failed", "error", err)
 		if waitMsgID > 0 {
-			_ = h.sender.EditMessage(ctx, msg.Chat.ID, waitMsgID, "\u274c Gagal generate report: "+err.Error())
+			_ = h.sender.EditMessage(ctx, msg.Chat.ID, waitMsgID, "❌ Gagal membuat report card. Silakan coba lagi nanti.")
 		}
 		return
 	}
@@ -979,13 +1039,13 @@ func (h *Handler) executeReset(ctx context.Context, chatID int64, threadID int) 
 		archivedCount = n
 		if err != nil {
 			h.logger.Error("notion reset failed", "error", err)
-			_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("⚠️ Sebagian reset Notion gagal (%d diarsipkan): %v", archivedCount, err), threadID)
+			_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("⚠️ Sebagian reset Notion gagal (%d halaman diarsipkan). Cek log server untuk detail.", archivedCount), threadID)
 		}
 	}
 	if h.resetter != nil {
 		if err := h.resetter.Reset(); err != nil {
 			h.logger.Error("badger reset failed", "error", err)
-			_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal mereset BadgerDB: "+err.Error(), threadID)
+			_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal mereset BadgerDB.", threadID)
 			return
 		}
 	}
@@ -1104,7 +1164,7 @@ func (h *Handler) cmdUndo(ctx context.Context, msg *Message) {
 func (h *Handler) deleteTradeAndNotify(ctx context.Context, userID int64, trade *domain.Trade, chatID int64, threadID int) {
 	if err := h.svc.Journal.DeleteTrade(ctx, userID, trade.ID); err != nil {
 		h.logger.Error("delete trade failed", "error", err)
-		_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal menghapus trade: "+err.Error(), threadID)
+		_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal menghapus trade.", threadID)
 		return
 	}
 	xpNote := ""
@@ -1121,7 +1181,7 @@ func (h *Handler) deleteTradeAndNotify(ctx context.Context, userID int64, trade 
 func (h *Handler) applyTradeUpdate(ctx context.Context, userID int64, oldTrade, newTrade *domain.Trade, chatID int64, threadID int) {
 	if err := h.svc.Journal.UpdateTrade(ctx, userID, newTrade); err != nil {
 		h.logger.Error("update trade failed", "error", err)
-		_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal mengupdate trade: "+err.Error(), threadID)
+		_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal mengupdate trade.", threadID)
 		return
 	}
 	xpNote := ""
@@ -1129,18 +1189,7 @@ func (h *Handler) applyTradeUpdate(ctx context.Context, userID int64, oldTrade, 
 		if prof, delta, err := h.svc.Gamification.AdjustXPForTradeChange(ctx, userID, oldTrade, newTrade); err == nil && delta != 0 {
 			xpNote = fmt.Sprintf("\n⚡ XP disesuaikan: <b>%+d XP</b> (Total: %d XP — Level %d %s)", delta, prof.TotalXP, prof.Level, prof.Title)
 		}
-		if h.svc.Badge != nil {
-			streak, _ := h.svc.Gamification.GetStreak(ctx, userID)
-			newBadges, _ := h.svc.Badge.CheckAndAwardBadges(ctx, userID, newTrade, streak)
-			if len(newBadges) > 0 {
-				_, _ = h.sender.SendHTML(ctx, chatID, FormatBadgeUnlock(newBadges), threadID)
-			}
-		}
-		if h.svc.Goal != nil {
-			if achieved, _ := h.svc.Goal.CheckGoalCompletion(ctx, userID); achieved {
-				_, _ = h.sender.SendHTML(ctx, chatID, "🎯 <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", threadID)
-			}
-		}
+		h.evaluatePostTradeRewards(ctx, userID, newTrade, chatID, threadID)
 	}
 	revengeWarn := h.checkRevengeWarning(ctx, userID, newTrade)
 	msg := fmt.Sprintf("✅ <b>Trade berhasil diperbarui!</b>\n\nSymbol: <b>%s</b> (%s)\nDirection: <b>%s</b>\nStatus: <b>%s</b> (%+.1fR)%s%s",

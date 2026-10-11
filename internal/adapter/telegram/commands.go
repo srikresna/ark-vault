@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Command is the single source of truth for a bot command. Routing, the
@@ -90,9 +91,9 @@ func commandCatalog() []Command {
 		},
 		{
 			Name: "stats", Group: groupStats,
-			Desc: "Statistik trading (all/week/month)",
+			Desc: "Statistik trading (all/week/month/pair/session)",
 			Help: []string{
-				"/stats [week|month] — Statistik personal",
+				"/stats [week|month] [pair] [session] — Statistik &amp; R-Curve",
 				"/stats @user [week|month] — Statistik member lain",
 			},
 			Run: func(h *Handler, ctx context.Context, msg *Message, text string) { h.cmdStats(ctx, msg, text) },
@@ -110,8 +111,8 @@ func commandCatalog() []Command {
 			Name: "export", Group: groupExport,
 			Desc: "Export jurnal ke CSV/PDF",
 			Help: []string{
-				"/export — Export journal (CSV)",
-				"/export pdf — Export journal (PDF)",
+				"/export [week|month] — Export journal (CSV)",
+				"/export pdf [week|month] — Export journal (PDF)",
 			},
 			Run: func(h *Handler, ctx context.Context, msg *Message, text string) { h.cmdExport(ctx, msg, text) },
 		},
@@ -167,7 +168,7 @@ func commandCatalog() []Command {
 			Name: "help", Group: groupOther,
 			Desc: "Panduan penggunaan bot",
 			Help: []string{"/help — Tampilkan pesan ini"},
-			Run: func(h *Handler, ctx context.Context, msg *Message, _ string) { h.sendHelp(ctx, msg) },
+			Run:  func(h *Handler, ctx context.Context, msg *Message, _ string) { h.sendHelp(ctx, msg) },
 		},
 		{
 			Name: "start", Group: groupOther,
@@ -240,6 +241,7 @@ func (h *Handler) dispatchCommand(ctx context.Context, msg *Message, text string
 	if cmd.OwnerOnly && (msg.From == nil || h.ownerID == 0 || msg.From.ID != h.ownerID) {
 		return true
 	}
+	atomic.AddUint64(&h.metricCommandsTotal, 1)
 	cmd.Run(h, ctx, msg, text)
 	return true
 }

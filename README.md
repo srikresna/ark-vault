@@ -12,14 +12,18 @@
   - `/history` — Paginated trade history with inline edit and delete actions.
   - `/undo` — Delete the most recently recorded trade and reconcile XP.
 - **Analytics & Reports**:
-  - `/stats [week|month] [@username]` — Win rate, total/avg RR, expectancy, profit factor, per-asset/session breakdown, and revenge-trading warnings.
+  - `/stats [week|month] [pair] [session] [@username]` — Win rate, total/avg RR, expectancy, profit factor, max drawdown, per-asset/session breakdown, Unicode R-Curve (cumulative equity sparkline), and revenge-trading warnings.
   - `/leaderboard [week|month] [rr]` — Community Top 10 rankings.
   - `/report` — Weekly community summary (also auto-posted by the scheduler).
-  - `/export [pdf]` — Sanitized CSV and zero-dependency PDF trade journal export.
+  - `/export [week|month] [pdf]` — Sanitized CSV and zero-dependency PDF trade journal export with period filtering.
 - **Gamification & AI Coaching**:
   - `/profile`, `/badges`, `/challenge`, `/goal`, `/reminder` — Progression, streaks, badges, rotating weekly challenges, monthly targets, and daily/community reminders (all evaluated in `Asia/Jakarta` / `WIB`).
   - `/analyze` & `/reportcard [current]` — AI-powered trade diagnostics and monthly report cards via Google Gemini.
 
+- **Observability & Reliability**:
+  - Native daily BadgerDB snapshot backup at 03:00 WIB into `/data/badger/backups` with 7-day automatic retention.
+  - Stdlib-only Prometheus metrics exposition at `http://localhost:9102/metrics` (`ark_vault_updates_total`, `ark_vault_commands_total`, `ark_vault_rate_limited_total`, etc.) and `/healthz` endpoint.
+  - Concurrency-bounded update worker pool (max 32 concurrent goroutines) with panic recovery and graceful shutdown drain.
 ## Architecture
 
 The project follows **Hexagonal Architecture (Ports & Adapters)** with consumer-side interfaces and a strict stdlib-first policy (`github.com/dgraph-io/badger/v4` is the sole direct dependency):

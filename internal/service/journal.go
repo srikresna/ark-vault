@@ -74,11 +74,16 @@ func (s *JournalService) GetMemberStats(ctx context.Context, memberTgID int64) (
 
 // GetMemberStatsByPeriod retrieves trades for a member filtered by period ("week", "month", "all") and calculates stats.
 func (s *JournalService) GetMemberStatsByPeriod(ctx context.Context, memberTgID int64, period string) (*domain.Stats, error) {
+	return s.GetMemberStatsWithFilter(ctx, memberTgID, domain.StatsFilter{Period: period})
+}
+
+// GetMemberStatsWithFilter retrieves trades for a member filtered by period, symbol, and session and calculates stats.
+func (s *JournalService) GetMemberStatsWithFilter(ctx context.Context, memberTgID int64, filter domain.StatsFilter) (*domain.Stats, error) {
 	trades, err := s.trades.GetTrades(ctx, memberTgID)
 	if err != nil {
 		return nil, fmt.Errorf("get trades: %w", err)
 	}
-	filtered := domain.FilterTradesByPeriod(trades, period, time.Now().In(timeutil.WIB))
+	filtered := domain.FilterTrades(trades, filter, time.Now().In(timeutil.WIB))
 	if len(filtered) == 0 {
 		return nil, nil
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
@@ -209,15 +210,31 @@ func (r *TradeRepo) parseTrades(items []json.RawMessage) ([]domain.Trade, error)
 	return trades, nil
 }
 
+type notionTextSegment struct {
+	PlainText string `json:"plain_text"`
+}
+
+func joinNotionPlainText(segments []notionTextSegment) string {
+	if len(segments) == 0 {
+		return ""
+	}
+	if len(segments) == 1 {
+		return segments[0].PlainText
+	}
+	var sb strings.Builder
+	for _, seg := range segments {
+		sb.WriteString(seg.PlainText)
+	}
+	return sb.String()
+}
+
 // parseSingleTrade extracts a Trade from a Notion page JSON.
 func (r *TradeRepo) parseSingleTrade(raw json.RawMessage) (*domain.Trade, error) {
 	var page struct {
 		ID         string `json:"id"`
 		Properties struct {
 			Symbol struct {
-				Title []struct {
-					PlainText string `json:"plain_text"`
-				} `json:"title"`
+				Title []notionTextSegment `json:"title"`
 			} `json:"Symbol"`
 			Date struct {
 				Date *struct {
@@ -248,14 +265,10 @@ func (r *TradeRepo) parseSingleTrade(raw json.RawMessage) (*domain.Trade, error)
 				} `json:"select"`
 			} `json:"Time Window"`
 			Confluence struct {
-				RichText []struct {
-					PlainText string `json:"plain_text"`
-				} `json:"rich_text"`
+				RichText []notionTextSegment `json:"rich_text"`
 			} `json:"Confluence"`
 			Notes struct {
-				RichText []struct {
-					PlainText string `json:"plain_text"`
-				} `json:"rich_text"`
+				RichText []notionTextSegment `json:"rich_text"`
 			} `json:"Notes"`
 		} `json:"properties"`
 	}
@@ -264,11 +277,13 @@ func (r *TradeRepo) parseSingleTrade(raw json.RawMessage) (*domain.Trade, error)
 		return nil, err
 	}
 
-	t := &domain.Trade{ID: page.ID}
-
-	if len(page.Properties.Symbol.Title) > 0 {
-		t.Symbol = page.Properties.Symbol.Title[0].PlainText
+	t := &domain.Trade{
+		ID:         page.ID,
+		Symbol:     joinNotionPlainText(page.Properties.Symbol.Title),
+		Confluence: joinNotionPlainText(page.Properties.Confluence.RichText),
+		Notes:      joinNotionPlainText(page.Properties.Notes.RichText),
 	}
+
 	if page.Properties.Date.Date != nil {
 		// best-effort parse
 		if parsed, err := parseDate(page.Properties.Date.Date.Start); err == nil {
@@ -289,12 +304,6 @@ func (r *TradeRepo) parseSingleTrade(raw json.RawMessage) (*domain.Trade, error)
 	}
 	if page.Properties.TimeWindow.Select != nil {
 		t.TimeWindow = domain.TimeWindow(page.Properties.TimeWindow.Select.Name)
-	}
-	if len(page.Properties.Confluence.RichText) > 0 {
-		t.Confluence = page.Properties.Confluence.RichText[0].PlainText
-	}
-	if len(page.Properties.Notes.RichText) > 0 {
-		t.Notes = page.Properties.Notes.RichText[0].PlainText
 	}
 
 	return t, nil

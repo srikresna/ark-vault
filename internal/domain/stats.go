@@ -28,6 +28,15 @@ type Stats struct {
 	ByAsset      map[AssetType]AssetStats
 	BySession    map[TimeWindow]AssetStats
 	TopSymbols   []SymbolStats
+	EquityCurve  []float64 // chronological cumulative R after each closed trade
+	MaxDrawdownR float64   // largest peak-to-trough drop in cumulative R
+}
+
+// StatsFilter specifies optional period, symbol, and session filters for stats.
+type StatsFilter struct {
+	Period  string     // "all", "week", "month"
+	Symbol  string     // optional pair/symbol filter (case-insensitive)
+	Session TimeWindow // optional session filter
 }
 
 // AssetStats is a per-asset-type or per-session breakdown.
@@ -196,6 +205,29 @@ func CalculateStats(trades []Trade) Stats {
 	s.CurStreak = curStreak
 	s.MaxWinStrk = maxWin
 
+	// Compute chronological EquityCurve and MaxDrawdownR over closed trades.
+	var closedTrades []Trade
+	for _, t := range trades {
+		if t.Status == StatusWin || t.Status == StatusLoss || t.Status == StatusBE {
+			closedTrades = append(closedTrades, t)
+		}
+	}
+	sort.SliceStable(closedTrades, func(i, j int) bool {
+		return closedTrades[i].Date.Before(closedTrades[j].Date)
+	})
+	var cumR, peakR, maxDD float64
+	for _, t := range closedTrades {
+		cumR += t.ResultRR
+		s.EquityCurve = append(s.EquityCurve, cumR)
+		if cumR > peakR {
+			peakR = cumR
+		}
+		if dd := peakR - cumR; dd > maxDD {
+			maxDD = dd
+		}
+	}
+	s.MaxDrawdownR = maxDD
+
 	return s
 }
 
@@ -227,6 +259,27 @@ func FilterTradesByPeriod(trades []Trade, period string, now time.Time) []Trade 
 	default:
 		return trades
 	}
+}
+
+// FilterTrades applies period, symbol, and session filters to trades.
+func FilterTrades(trades []Trade, f StatsFilter, now time.Time) []Trade {
+	periodFiltered := FilterTradesByPeriod(trades, f.Period, now)
+	if f.Symbol == "" && f.Session == "" {
+		return periodFiltered
+	}
+	wantSym := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(f.Symbol), "/", ""))
+	wantSess := strings.ToLower(strings.TrimSpace(string(f.Session)))
+	var out []Trade
+	for _, t := range periodFiltered {
+		if wantSym != "" && !strings.EqualFold(t.Symbol, wantSym) {
+			continue
+		}
+		if wantSess != "" && !strings.EqualFold(string(t.TimeWindow), wantSess) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // ConsecutiveLossesToday counts consecutive LOSS trades recorded on the same WIB day as now (from most recent).

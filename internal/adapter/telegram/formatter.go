@@ -27,8 +27,20 @@ func periodLabel(period string) string {
 
 // FormatStatsWithPeriod formats member stats for a specific period ("all", "week", "month").
 func FormatStatsWithPeriod(username, period string, s *domain.Stats) string {
+	return FormatStatsWithFilter(username, domain.StatsFilter{Period: period}, s)
+}
+
+// FormatStatsWithFilter formats member stats with optional period, symbol, and session filters.
+func FormatStatsWithFilter(username string, f domain.StatsFilter, s *domain.Stats) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "📊 <b>Stats — @%s (%s)</b>\n\n", username, periodLabel(period))
+	scope := periodLabel(f.Period)
+	if f.Symbol != "" {
+		scope += " • " + f.Symbol
+	}
+	if f.Session != "" {
+		scope += " • " + string(f.Session)
+	}
+	fmt.Fprintf(&sb, "📊 <b>Stats — @%s (%s)</b>\n\n", username, scope)
 	fmt.Fprintf(&sb, "Total trades: <b>%d</b>\n", s.TotalTrades)
 	fmt.Fprintf(&sb, "Win/Loss/BE: <b>%d</b>/%d/%d\n", s.Wins, s.Losses, s.BreakEvens)
 	if s.OpenTrades > 0 {
@@ -42,6 +54,9 @@ func FormatStatsWithPeriod(username, period string, s *domain.Stats) string {
 	}
 	fmt.Fprintf(&sb, "Total RR: <b>%+.1fR</b>\n", s.TotalRR)
 	fmt.Fprintf(&sb, "Best: <b>%+.1fR</b> | Worst: <b>%+.1fR</b>\n", s.BestRR, s.WorstRR)
+	if s.MaxDrawdownR > 0 {
+		fmt.Fprintf(&sb, "Max Drawdown: <b>-%.1fR</b>\n", s.MaxDrawdownR)
+	}
 
 	if s.CurStreak > 0 {
 		fmt.Fprintf(&sb, "Current streak: 🔥 <b>%d</b> wins\n", s.CurStreak)
@@ -51,8 +66,10 @@ func FormatStatsWithPeriod(username, period string, s *domain.Stats) string {
 	if s.MaxWinStrk > 0 {
 		fmt.Fprintf(&sb, "Longest win streak: <b>%d</b>\n", s.MaxWinStrk)
 	}
+	if curve := FormatRCurve(s.EquityCurve); curve != "" {
+		fmt.Fprintf(&sb, "\n📈 <b>R-Curve:</b> %s\n", curve)
+	}
 
-	// Per-session breakdown
 	if len(s.BySession) > 0 {
 		sb.WriteString("\n<b>Per Session:</b>\n")
 		sessions := []domain.TimeWindow{domain.SessionAsia, domain.SessionLondon, domain.SessionNYAM, domain.SessionNYPM}
@@ -88,6 +105,44 @@ func FormatStatsWithPeriod(username, period string, s *domain.Stats) string {
 	}
 
 	return sb.String()
+}
+
+// FormatRCurve renders a compact Unicode sparkline and start→end cumulative R
+// from a chronological slice of cumulative R values.
+func FormatRCurve(curve []float64) string {
+	if len(curve) == 0 {
+		return ""
+	}
+	// Display up to the 16 most recent closed trades so the sparkline stays compact on mobile.
+	pts := append([]float64{0}, curve...)
+	if len(pts) > 17 {
+		pts = pts[len(pts)-17:]
+	}
+	minV, maxV := pts[0], pts[0]
+	for _, v := range pts[1:] {
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+	}
+	bars := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+	var spark strings.Builder
+	span := maxV - minV
+	for _, v := range pts {
+		idx := 3
+		if span > 1e-9 {
+			idx = int((v - minV) / span * float64(len(bars)-1))
+			if idx < 0 {
+				idx = 0
+			} else if idx >= len(bars) {
+				idx = len(bars) - 1
+			}
+		}
+		spark.WriteRune(bars[idx])
+	}
+	return fmt.Sprintf("<code>%s</code> (%+.1fR)", spark.String(), curve[len(curve)-1])
 }
 
 // FormatLeaderboard formats the leaderboard as an HTML Telegram message.

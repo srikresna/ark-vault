@@ -4,22 +4,25 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	badgerdb "github.com/arkcode369/ark-vault/internal/adapter/badger"
 	"github.com/arkcode369/ark-vault/internal/adapter/exporter"
 	"github.com/arkcode369/ark-vault/internal/adapter/gemini"
 	"github.com/arkcode369/ark-vault/internal/adapter/notion"
 	"github.com/arkcode369/ark-vault/internal/adapter/telegram"
-	badgerdb "github.com/arkcode369/ark-vault/internal/adapter/badger"
 	"github.com/arkcode369/ark-vault/internal/config"
 	"github.com/arkcode369/ark-vault/internal/domain"
 	"github.com/arkcode369/ark-vault/internal/scheduler"
-	"github.com/arkcode369/ark-vault/pkg/timeutil"
 	"github.com/arkcode369/ark-vault/internal/service"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 var version = "dev"
@@ -276,9 +279,71 @@ func main() {
 		},
 	})
 
+	// Daily BadgerDB backup (03:00 WIB, keeps 7 daily snapshots)
+	sched.Add(scheduler.Job{
+		Name:     "badger-daily-backup",
+		Interval: 1 * time.Hour,
+		Run: func(_ context.Context) error {
+			now := time.Now().In(timeutil.WIB)
+			if now.Hour() == 3 && sched.MarkAndCheck("badger-daily-backup", now) {
+				backupDir := filepath.Join(cfg.BadgerDBPath, "backups")
+				path, err := store.BackupToDir(backupDir, 7)
+				if err != nil {
+					logger.Error("badger daily backup failed", "error", err)
+					return err
+				}
+				logger.Info("badger daily backup completed", "path", path)
+			}
+			return nil
+		},
+	})
+
 	go sched.Start(ctx)
 	logger.Info("scheduler started")
 
+	// Stdlib-only Prometheus metrics & health server
+	if cfg.MetricsAddr != "" && cfg.MetricsAddr != "off" && cfg.MetricsAddr != "none" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+		})
+		startTime := time.Now()
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			m := handler.Metrics()
+			var mem runtime.MemStats
+			runtime.ReadMemStats(&mem)
+			uptime := time.Since(startTime).Seconds()
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_up Whether the bot process is running.\n# TYPE ark_vault_up gauge\nark_vault_up 1\n\n")
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_build_info Build and version metadata.\n# TYPE ark_vault_build_info gauge\nark_vault_build_info{version=%q} 1\n\n", version)
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_uptime_seconds Process uptime in seconds.\n# TYPE ark_vault_uptime_seconds counter\nark_vault_uptime_seconds %.1f\n\n", uptime)
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_goroutines Current goroutine count.\n# TYPE ark_vault_goroutines gauge\nark_vault_goroutines %d\n\n", runtime.NumGoroutine())
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_memory_alloc_bytes Heap alloc in bytes.\n# TYPE ark_vault_memory_alloc_bytes gauge\nark_vault_memory_alloc_bytes %d\n\n", mem.Alloc)
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_updates_total Telegram updates processed.\n# TYPE ark_vault_updates_total counter\nark_vault_updates_total %d\n\n", m.UpdatesTotal)
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_commands_total Slash commands processed.\n# TYPE ark_vault_commands_total counter\nark_vault_commands_total %d\n\n", m.CommandsTotal)
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_callbacks_total Inline callbacks processed.\n# TYPE ark_vault_callbacks_total counter\nark_vault_callbacks_total %d\n\n", m.CallbacksTotal)
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_rate_limited_total Requests blocked by rate limiting.\n# TYPE ark_vault_rate_limited_total counter\nark_vault_rate_limited_total %d\n\n", m.RateLimitedTotal)
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_panics_total Panics recovered in handler.\n# TYPE ark_vault_panics_total counter\nark_vault_panics_total %d\n", m.PanicsTotal)
+		})
+		metricsSrv := &http.Server{
+			Addr:              cfg.MetricsAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			logger.Info("metrics server listening", "addr", cfg.MetricsAddr)
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("metrics server error", "error", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = metricsSrv.Shutdown(shutdownCtx)
+		}()
+	}
 	logger.Info("ark-vault bot starting", "version", version)
 	if err := bot.Start(ctx); err != nil && err != context.Canceled {
 		logger.Error("bot stopped with error", "error", err)

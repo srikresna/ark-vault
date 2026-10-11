@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+	"os"
+	"path/filepath"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
@@ -527,5 +529,48 @@ func TestStore_Reset(t *testing.T) {
 	}
 	if len(activeGoals) != 0 {
 		t.Fatalf("expected 0 goals after reset, got %d", len(activeGoals))
+	}
+}
+
+func TestStore_BackupToDirAndRotation(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	gamRepo := NewGamificationRepo(store)
+	if err := gamRepo.SaveProfile(ctx, &domain.GamificationProfile{TelegramID: 999, TotalXP: 1234}); err != nil {
+		t.Fatalf("SaveProfile failed: %v", err)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "badger-backup-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	path1, err := store.BackupToDir(tmpDir, 2)
+	if err != nil {
+		t.Fatalf("first BackupToDir failed: %v", err)
+	}
+	if fi, err := os.Stat(path1); err != nil || fi.Size() == 0 {
+		t.Fatalf("backup file %s missing or empty (err=%v)", path1, err)
+	}
+
+	// Pre-create older dummy backup files to verify rotation prunes them
+	old1 := filepath.Join(tmpDir, "badger-20260101-000000.bak.gz")
+	old2 := filepath.Join(tmpDir, "badger-20260102-000000.bak.gz")
+	_ = os.WriteFile(old1, []byte("old1"), 0644)
+	_ = os.WriteFile(old2, []byte("old2"), 0644)
+
+	// Run backup keeping only 2
+	_, err = store.BackupToDir(tmpDir, 2)
+	if err != nil {
+		t.Fatalf("second BackupToDir failed: %v", err)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(tmpDir, "badger-*.bak.gz"))
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 backups retained after pruning, got %d (%v)", len(matches), matches)
+	}
+	if _, err := os.Stat(old1); !os.IsNotExist(err) {
+		t.Errorf("expected oldest backup %s to be pruned", old1)
 	}
 }

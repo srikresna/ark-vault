@@ -33,6 +33,8 @@ type Config struct {
 
 	// Rate limiting
 	RateLimitPerMin int // Max commands per user per minute. Default: 10
+	// Metrics & Health server (Prometheus exposition format)
+	MetricsAddr string // HTTP address to serve /metrics and /healthz. Default: :9102
 }
 
 // Load reads configuration from environment variables.
@@ -124,5 +126,10 @@ func Load() (*Config, error) {
 		c.RateLimitPerMin = 10
 	}
 
+
+	c.MetricsAddr = strings.TrimSpace(os.Getenv("METRICS_ADDR"))
+	if c.MetricsAddr == "" {
+		c.MetricsAddr = ":9102"
+	}
 	return c, nil
 }

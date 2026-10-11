@@ -167,6 +167,8 @@ func TestFormatStatsWithPeriodAndRevengeWarning(t *testing.T) {
 		AvgRR:        1.25,
 		Expectancy:   1.25,
 		ProfitFactor: 6.0,
+		MaxDrawdownR: 1.5,
+		EquityCurve:  []float64{2.0, 0.5, 3.0, 5.0},
 		BySession: map[domain.TimeWindow]domain.AssetStats{
 			domain.SessionLondon: {Total: 3, Wins: 3, TotalRR: 6.0, WinRate: 100.0},
 		},
@@ -174,9 +176,11 @@ func TestFormatStatsWithPeriodAndRevengeWarning(t *testing.T) {
 			{Symbol: "XAUUSD", Total: 3, Wins: 3, TotalRR: 6.0, WinRate: 100.0},
 		},
 	}
-	out := FormatStatsWithPeriod("kresna", "month", s)
-	if !strings.Contains(out, "Expectancy") || !strings.Contains(out, "Profit Factor") || !strings.Contains(out, "London") || !strings.Contains(out, "XAUUSD") {
-		t.Errorf("FormatStatsWithPeriod missing expected sections:\n%s", out)
+	out := FormatStatsWithFilter("kresna", domain.StatsFilter{Period: "month", Symbol: "XAUUSD", Session: domain.SessionLondon}, s)
+	for _, want := range []string{"Expectancy", "Profit Factor", "Max Drawdown", "R-Curve", "London", "XAUUSD"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("FormatStatsWithFilter missing %q:\n%s", want, out)
+		}
 	}
 
 	warn := FormatRevengeWarning(3)

@@ -174,3 +174,31 @@ func TestTradeRepo_UpdateAndDeleteTrade(t *testing.T) {
 		t.Errorf("expected cache invalidated after DeleteTrade")
 	}
 }
+
+// TestTradeRepo_ParseSingleTrade_ConcatenatesMultiSegmentRichText verifies that
+// multi-segment Notion title/rich_text arrays are concatenated rather than
+// truncated to segment 0.
+func TestTradeRepo_ParseSingleTrade_ConcatenatesMultiSegmentRichText(t *testing.T) {
+	repo := NewTradeRepo(NewClient("token"), nil)
+	raw := []byte(`{
+		"id":"t-multi",
+		"properties":{
+			"Symbol":{"title":[{"plain_text":"XAU"},{"plain_text":"USD"}]},
+			"Confluence":{"rich_text":[{"plain_text":"FVG + "},{"plain_text":"OB mitigation"},{"plain_text":" on 15m"}]},
+			"Notes":{"rich_text":[{"plain_text":"Part 1 - "},{"plain_text":"Part 2"}]}
+		}
+	}`)
+	tr, err := repo.parseSingleTrade(raw)
+	if err != nil {
+		t.Fatalf("parseSingleTrade failed: %v", err)
+	}
+	if tr.Symbol != "XAUUSD" {
+		t.Errorf("Symbol = %q, want XAUUSD", tr.Symbol)
+	}
+	if tr.Confluence != "FVG + OB mitigation on 15m" {
+		t.Errorf("Confluence = %q, want %q", tr.Confluence, "FVG + OB mitigation on 15m")
+	}
+	if tr.Notes != "Part 1 - Part 2" {
+		t.Errorf("Notes = %q, want %q", tr.Notes, "Part 1 - Part 2")
+	}
+}

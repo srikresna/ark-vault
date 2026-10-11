@@ -183,3 +183,32 @@ func TestWIBBoundariesAreLocationIndependent(t *testing.T) {
 		t.Errorf("YearWeekString = %s, want %s", got, want)
 	}
 }
+
+func TestCalculateStats_EquityCurveAndMaxDrawdown(t *testing.T) {
+	base := time.Date(2026, 10, 1, 9, 0, 0, 0, timeutil.WIB)
+	// Chronological sequence: +3R -> -2R (drawdown 2R from peak +3R) -> +4R (new peak +5R)
+	trades := []Trade{
+		{ID: "3", Date: base.Add(4 * time.Hour), Symbol: "XAUUSD", TimeWindow: SessionLondon, Status: StatusWin, ResultRR: 4.0},
+		{ID: "1", Date: base, Symbol: "XAUUSD", TimeWindow: SessionAsia, Status: StatusWin, ResultRR: 3.0},
+		{ID: "2", Date: base.Add(2 * time.Hour), Symbol: "EURUSD", TimeWindow: SessionLondon, Status: StatusLoss, ResultRR: -2.0},
+	}
+
+	s := CalculateStats(trades)
+	wantCurve := []float64{3.0, 1.0, 5.0}
+	if len(s.EquityCurve) != len(wantCurve) {
+		t.Fatalf("EquityCurve len = %d, want %d (%v)", len(s.EquityCurve), len(wantCurve), s.EquityCurve)
+	}
+	for i := range wantCurve {
+		if math.Abs(s.EquityCurve[i]-wantCurve[i]) > 1e-6 {
+			t.Errorf("EquityCurve[%d] = %.2f, want %.2f", i, s.EquityCurve[i], wantCurve[i])
+		}
+	}
+	if math.Abs(s.MaxDrawdownR-2.0) > 1e-6 {
+		t.Errorf("MaxDrawdownR = %.2f, want 2.00", s.MaxDrawdownR)
+	}
+
+	filtered := FilterTrades(trades, StatsFilter{Period: "all", Symbol: "xau/usd", Session: SessionLondon}, base.Add(5*time.Hour))
+	if len(filtered) != 1 || filtered[0].ID != "3" {
+		t.Fatalf("FilterTrades(XAUUSD, London) = %+v, want [ID=3]", filtered)
+	}
+}
