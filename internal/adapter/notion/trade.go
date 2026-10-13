@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
@@ -46,7 +47,7 @@ func (r *TradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain
 		return fmt.Errorf("member %d has no trade database", memberID)
 	}
 
-	props := r.buildTradeProperties(trade)
+	props := r.buildTradeProperties(trade, false)
 	payload := map[string]interface{}{
 		"parent": map[string]interface{}{
 			"database_id": member.NotionDBID,
@@ -116,7 +117,10 @@ func (r *TradeRepo) UpdateTrade(ctx context.Context, memberID int64, trade *doma
 		return fmt.Errorf("trade ID is required for update")
 	}
 	trade.AutoDetectAsset()
-	props := r.buildTradeProperties(trade)
+	// forUpdate=true emits clear-values for optional properties so an edit can
+	// actually empty Time Window/Confluence/Notes instead of leaving the old
+	// value behind in Notion.
+	props := r.buildTradeProperties(trade, true)
 	payload := map[string]interface{}{
 		"properties": props,
 	}
@@ -147,7 +151,11 @@ func (r *TradeRepo) DeleteTrade(ctx context.Context, memberID int64, tradeID str
 }
 
 // buildTradeProperties converts a Trade to Notion page properties.
-func (r *TradeRepo) buildTradeProperties(t *domain.Trade) map[string]interface{} {
+//
+// When forUpdate is true, optional properties are emitted even when empty
+// (select:null, rich_text:[]) so an update clears them in Notion; a create
+// omits them instead, leaving the Notion defaults in place.
+func (r *TradeRepo) buildTradeProperties(t *domain.Trade, forUpdate bool) map[string]interface{} {
 	props := map[string]interface{}{
 		"Symbol": map[string]interface{}{
 			"title": []map[string]interface{}{
@@ -175,24 +183,37 @@ func (r *TradeRepo) buildTradeProperties(t *domain.Trade) map[string]interface{}
 	if t.ResultRR != 0 || t.Status == domain.StatusBE || t.Status == domain.StatusOpen {
 		props["Result RR"] = map[string]interface{}{"number": t.ResultRR}
 	}
-	if t.TimeWindow != "" {
+
+	switch {
+	case t.TimeWindow != "":
 		props["Time Window"] = map[string]interface{}{
 			"select": map[string]interface{}{"name": string(t.TimeWindow)},
 		}
+	case forUpdate:
+		props["Time Window"] = map[string]interface{}{"select": nil}
 	}
-	if t.Confluence != "" {
+
+	emptyText := []map[string]interface{}{}
+	switch {
+	case t.Confluence != "":
 		props["Confluence"] = map[string]interface{}{
 			"rich_text": []map[string]interface{}{
 				{"text": map[string]interface{}{"content": t.Confluence}},
 			},
 		}
+	case forUpdate:
+		props["Confluence"] = map[string]interface{}{"rich_text": emptyText}
 	}
-	if t.Notes != "" {
+
+	switch {
+	case t.Notes != "":
 		props["Notes"] = map[string]interface{}{
 			"rich_text": []map[string]interface{}{
 				{"text": map[string]interface{}{"content": t.Notes}},
 			},
 		}
+	case forUpdate:
+		props["Notes"] = map[string]interface{}{"rich_text": emptyText}
 	}
 	return props
 }
@@ -231,8 +252,9 @@ func joinNotionPlainText(segments []notionTextSegment) string {
 // parseSingleTrade extracts a Trade from a Notion page JSON.
 func (r *TradeRepo) parseSingleTrade(raw json.RawMessage) (*domain.Trade, error) {
 	var page struct {
-		ID         string `json:"id"`
-		Properties struct {
+		ID          string `json:"id"`
+		CreatedTime string `json:"created_time"`
+		Properties  struct {
 			Symbol struct {
 				Title []notionTextSegment `json:"title"`
 			} `json:"Symbol"`
@@ -282,6 +304,14 @@ func (r *TradeRepo) parseSingleTrade(raw json.RawMessage) (*domain.Trade, error)
 		Symbol:     joinNotionPlainText(page.Properties.Symbol.Title),
 		Confluence: joinNotionPlainText(page.Properties.Confluence.RichText),
 		Notes:      joinNotionPlainText(page.Properties.Notes.RichText),
+	}
+
+	// Page creation time; best-effort RFC3339 parse used as the tie-breaker
+	// for same-day trades when picking the "latest" entry.
+	if page.CreatedTime != "" {
+		if ct, err := time.Parse(time.RFC3339, page.CreatedTime); err == nil {
+			t.CreatedAt = ct
+		}
 	}
 
 	if page.Properties.Date.Date != nil {

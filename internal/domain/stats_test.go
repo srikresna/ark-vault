@@ -63,6 +63,30 @@ func TestCalculateStats_Empty(t *testing.T) {
 	}
 }
 
+// TestCalculateStats_BestWorstIgnoreOpenAndBE pins the invariant that an OPEN
+// or BE trade's 0R never surfaces as the member's best or worst result, even
+// when it appears first in the slice.
+func TestCalculateStats_BestWorstIgnoreOpenAndBE(t *testing.T) {
+	s := CalculateStats([]Trade{
+		{Status: StatusOpen, AssetType: AssetForex},
+		{Status: StatusBE, AssetType: AssetForex},
+		{Status: StatusLoss, ResultRR: -1.5, AssetType: AssetGold},
+		{Status: StatusWin, ResultRR: 2.0, AssetType: AssetGold},
+	})
+	if s.BestRR != 2.0 {
+		t.Errorf("BestRR = %.1f, want 2.0 (not the OPEN trade's 0R)", s.BestRR)
+	}
+	if s.WorstRR != -1.5 {
+		t.Errorf("WorstRR = %.1f, want -1.5 (not the OPEN trade's 0R)", s.WorstRR)
+	}
+
+	// Only-open trades: best/worst stay zero rather than reporting 0R as a result.
+	s2 := CalculateStats([]Trade{{Status: StatusOpen}})
+	if s2.BestRR != 0 || s2.WorstRR != 0 {
+		t.Errorf("BestRR/WorstRR for open-only trades = %.1f/%.1f, want 0/0", s2.BestRR, s2.WorstRR)
+	}
+}
+
 func TestDetectAssetType(t *testing.T) {
 	tests := []struct {
 		symbol string

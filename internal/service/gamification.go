@@ -116,38 +116,32 @@ func (s *GamificationService) onTradeRecorded(ctx context.Context, memberID int6
 		}
 	}
 
-	totalXP := 0
+	// Trade-intrinsic XP, split from streak XP so the exact amount granted for
+	// this trade can be persisted (see TradeXPGrant) and later reconciled on
+	// edit/delete without ever clawing back XP the daily cap suppressed.
+	baseXP := 0
+	shotXP := 0
 	if tradeXPCountToday < domain.MaxDailyTradeXPCount {
-		// Trade logged
-		totalXP += domain.XPTradeLogged
-
-		// Win bonuses
-		if trade.Status == domain.StatusWin {
-			if trade.ResultRR >= 2 {
-				totalXP += domain.XPWinHighRR
-			} else {
-				totalXP += domain.XPWinBonus
-			}
-		}
-
-		// Screenshot bonus
+		baseXP = tradeBaseXPWithoutScreenshot(trade)
 		if trade.ScreenshotURL != "" {
-			totalXP += domain.XPScreenshot
+			shotXP = domain.XPScreenshot
 		}
 	}
 
 	// Streak XP (only if streak was incremented this call)
+	streakXP := 0
 	if streakIncremented {
-		totalXP += domain.XPDailyStreak
+		streakXP += domain.XPDailyStreak
 
 		// Milestone bonuses fire on exact match only
 		if streak.CurrentStreak == 7 {
-			totalXP += domain.XPStreak7
+			streakXP += domain.XPStreak7
 		}
 		if streak.CurrentStreak == 30 {
-			totalXP += domain.XPStreak30
+			streakXP += domain.XPStreak30
 		}
 	}
+	totalXP := baseXP + shotXP + streakXP
 
 	// 6. Update profile
 	oldLevel, _ := domain.LevelForXP(profile.TotalXP)
@@ -161,6 +155,19 @@ func (s *GamificationService) onTradeRecorded(ctx context.Context, memberID int6
 	}
 	if err := s.store.SaveStreak(ctx, streak); err != nil {
 		return nil, err
+	}
+	if trade != nil && trade.ID != "" {
+		// Record what this trade actually earned (possibly nothing under the
+		// daily cap) so AdjustXPForTradeChange reconciles the real amount.
+		if err := s.store.SaveTradeXPGrant(ctx, &domain.TradeXPGrant{
+			TelegramID: memberID,
+			TradeID:    trade.ID,
+			Base:       baseXP,
+			Screenshot: shotXP,
+			GrantedAt:  now,
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if totalXP > 0 {
 		if err := s.store.AppendXPEvent(ctx, &domain.XPEvent{
@@ -257,6 +264,17 @@ func (s *GamificationService) GetStreak(ctx context.Context, memberID int64) (*d
 
 // TradeBaseXP computes the trade-intrinsic XP for a single trade (log + win bonus + screenshot).
 func TradeBaseXP(trade *domain.Trade) int {
+	xp := tradeBaseXPWithoutScreenshot(trade)
+	if trade != nil && trade.ScreenshotURL != "" {
+		xp += domain.XPScreenshot
+	}
+	return xp
+}
+
+// tradeBaseXPWithoutScreenshot is the adjustable part of a trade's XP: log +
+// win bonus. The screenshot bonus is excluded because edits cannot add or
+// remove an attached screenshot, so it never needs reconciling.
+func tradeBaseXPWithoutScreenshot(trade *domain.Trade) int {
 	if trade == nil {
 		return 0
 	}
@@ -268,13 +286,14 @@ func TradeBaseXP(trade *domain.Trade) int {
 			xp += domain.XPWinBonus
 		}
 	}
-	if trade.ScreenshotURL != "" {
-		xp += domain.XPScreenshot
-	}
 	return xp
 }
 
 // AdjustXPForTradeChange reconciles a member's XP and level when a trade is edited, closed, or deleted (newTrade == nil).
+//
+// The delta is computed against the XP that was actually granted for the trade
+// (see TradeXPGrant), not its nominal base: a trade recorded after the daily
+// cap was reached earned nothing, so deleting it must not subtract anything.
 func (s *GamificationService) AdjustXPForTradeChange(ctx context.Context, memberID int64, oldTrade, newTrade *domain.Trade) (*domain.GamificationProfile, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -284,9 +303,26 @@ func (s *GamificationService) AdjustXPForTradeChange(ctx context.Context, member
 		return nil, 0, err
 	}
 
-	oldXP := TradeBaseXP(oldTrade)
-	newXP := TradeBaseXP(newTrade)
-	delta := newXP - oldXP
+	// Reconstruct what the old trade actually earned.
+	var grant *domain.TradeXPGrant
+	if oldTrade != nil && oldTrade.ID != "" {
+		grant, err = s.store.GetTradeXPGrant(ctx, memberID, oldTrade.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	if grant == nil {
+		// Legacy trade recorded before grants existed: assume the full
+		// adjustable base was granted (matches the pre-grant behaviour).
+		grant = &domain.TradeXPGrant{Base: tradeBaseXPWithoutScreenshot(oldTrade)}
+	}
+	if oldTrade != nil && grant.Base == 0 && grant.Screenshot == 0 {
+		// Recorded under the daily cap: nothing was granted to reconcile.
+		return profile, 0, nil
+	}
+
+	// The screenshot bonus is sticky — it stays granted regardless of the edit.
+	delta := tradeBaseXPWithoutScreenshot(newTrade) - grant.Base
 	if delta == 0 {
 		return profile, 0, nil
 	}
@@ -311,6 +347,24 @@ func (s *GamificationService) AdjustXPForTradeChange(ctx context.Context, member
 		Amount:     delta,
 		Reason:     reason,
 		Timestamp:  now,
+	}); err != nil {
+		return nil, 0, err
+	}
+
+	// Keep the grant in sync so a second adjustment reconciles against the
+	// updated state; a deletion removes it entirely.
+	if newTrade == nil || newTrade.ID == "" {
+		if oldTrade != nil && oldTrade.ID != "" {
+			if err := s.store.DeleteTradeXPGrant(ctx, memberID, oldTrade.ID); err != nil {
+				return nil, 0, err
+			}
+		}
+	} else if err := s.store.SaveTradeXPGrant(ctx, &domain.TradeXPGrant{
+		TelegramID: memberID,
+		TradeID:    newTrade.ID,
+		Base:       tradeBaseXPWithoutScreenshot(newTrade),
+		Screenshot: grant.Screenshot,
+		GrantedAt:  now,
 	}); err != nil {
 		return nil, 0, err
 	}

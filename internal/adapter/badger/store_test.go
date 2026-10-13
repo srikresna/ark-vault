@@ -124,6 +124,78 @@ func TestGamificationRepo(t *testing.T) {
 	}
 }
 
+// TestGamificationRepo_TradeXPGrantRoundtripAndPrune covers the per-trade XP
+// grant store used by cap-aware XP reconciliation, and the prune job that
+// keeps the XP log and stale grants from growing without bound.
+func TestGamificationRepo_TradeXPGrantRoundtripAndPrune(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewGamificationRepo(store)
+	ctx := context.Background()
+
+	// Missing grant returns nil, not an error.
+	g, err := repo.GetTradeXPGrant(ctx, 7, "nope")
+	if err != nil || g != nil {
+		t.Fatalf("GetTradeXPGrant(missing) = (%v, %v), want (nil, nil)", g, err)
+	}
+
+	// Roundtrip.
+	grant := &domain.TradeXPGrant{
+		TelegramID: 7,
+		TradeID:    "t-1",
+		Base:       domain.XPTradeLogged,
+		Screenshot: domain.XPScreenshot,
+		GrantedAt:  time.Now(),
+	}
+	if err := repo.SaveTradeXPGrant(ctx, grant); err != nil {
+		t.Fatalf("SaveTradeXPGrant failed: %v", err)
+	}
+	g, err = repo.GetTradeXPGrant(ctx, 7, "t-1")
+	if err != nil || g == nil || g.Base != grant.Base || g.Screenshot != grant.Screenshot {
+		t.Fatalf("grant roundtrip = (%+v, %v)", g, err)
+	}
+	if err := repo.DeleteTradeXPGrant(ctx, 7, "t-1"); err != nil {
+		t.Fatalf("DeleteTradeXPGrant failed: %v", err)
+	}
+	if g, _ := repo.GetTradeXPGrant(ctx, 7, "t-1"); g != nil {
+		t.Fatalf("grant should be deleted, got %+v", g)
+	}
+
+	// Prune: an old event and an old grant disappear; fresh ones survive.
+	now := time.Now()
+	old := &domain.XPEvent{TelegramID: 9, Amount: 10, Reason: "trade_recorded", Timestamp: now.Add(-120 * 24 * time.Hour)}
+	fresh := &domain.XPEvent{TelegramID: 9, Amount: 5, Reason: "trade_recorded", Timestamp: now.Add(-time.Hour)}
+	if err := repo.AppendXPEvent(ctx, old); err != nil {
+		t.Fatalf("AppendXPEvent(old) failed: %v", err)
+	}
+	if err := repo.AppendXPEvent(ctx, fresh); err != nil {
+		t.Fatalf("AppendXPEvent(fresh) failed: %v", err)
+	}
+	if err := repo.SaveTradeXPGrant(ctx, &domain.TradeXPGrant{TelegramID: 9, TradeID: "old", GrantedAt: old.Timestamp}); err != nil {
+		t.Fatalf("SaveTradeXPGrant(old) failed: %v", err)
+	}
+	if err := repo.SaveTradeXPGrant(ctx, &domain.TradeXPGrant{TelegramID: 9, TradeID: "fresh", GrantedAt: now}); err != nil {
+		t.Fatalf("SaveTradeXPGrant(fresh) failed: %v", err)
+	}
+
+	deleted, err := repo.PruneGamification(ctx, now.Add(-90*24*time.Hour))
+	if err != nil {
+		t.Fatalf("PruneGamification failed: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("expected 2 pruned keys (1 event + 1 grant), got %d", deleted)
+	}
+	events, err := repo.GetXPEvents(ctx, 9, time.Time{})
+	if err != nil || len(events) != 1 || events[0].Amount != 5 {
+		t.Fatalf("expected only the fresh event to survive, got %+v (err %v)", events, err)
+	}
+	if g, _ := repo.GetTradeXPGrant(ctx, 9, "old"); g != nil {
+		t.Fatalf("old grant should be pruned, got %+v", g)
+	}
+	if g, _ := repo.GetTradeXPGrant(ctx, 9, "fresh"); g == nil {
+		t.Fatal("fresh grant should survive the prune")
+	}
+}
+
 func TestBadgeRepo(t *testing.T) {
 	store := newTestStore(t)
 	repo := NewBadgeRepo(store)

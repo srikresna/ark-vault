@@ -277,6 +277,11 @@ func (stubGamStore) AppendXPEvent(context.Context, *domain.XPEvent) error { retu
 func (stubGamStore) GetXPEvents(context.Context, int64, time.Time) ([]domain.XPEvent, error) {
 	return nil, nil
 }
+func (stubGamStore) GetTradeXPGrant(context.Context, int64, string) (*domain.TradeXPGrant, error) {
+	return nil, nil
+}
+func (stubGamStore) SaveTradeXPGrant(context.Context, *domain.TradeXPGrant) error { return nil }
+func (stubGamStore) DeleteTradeXPGrant(context.Context, int64, string) error      { return nil }
 
 type stubBadgeStore struct{}
 

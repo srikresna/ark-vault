@@ -298,6 +298,30 @@ func main() {
 		},
 	})
 
+	// Daily gamification pruning (04:00 WIB): XP events and trade-XP grants
+	// have no consumer older than a couple of months (daily cap = today,
+	// report cards = current/previous month), but they slow every scan and
+	// grow the Badger value log unboundedly under the 128M container limit.
+	sched.Add(scheduler.Job{
+		Name:     "gam-prune",
+		Interval: 1 * time.Hour,
+		Run: func(ctx context.Context) error {
+			now := time.Now().In(timeutil.WIB)
+			if now.Hour() == 4 && sched.MarkAndCheck("gam-prune", now) {
+				cutoff := now.AddDate(0, 0, -90)
+				deleted, err := gamRepo.PruneGamification(ctx, cutoff)
+				if err != nil {
+					logger.Error("gamification prune failed", "error", err)
+					return err
+				}
+				if deleted > 0 {
+					logger.Info("gamification prune completed", "deleted", deleted, "cutoff", cutoff.Format("2006-01-02"))
+				}
+			}
+			return nil
+		},
+	})
+
 	go sched.Start(ctx)
 	logger.Info("scheduler started")
 
@@ -317,7 +341,7 @@ func main() {
 			uptime := time.Since(startTime).Seconds()
 			_, _ = fmt.Fprintf(w, "# HELP ark_vault_up Whether the bot process is running.\n# TYPE ark_vault_up gauge\nark_vault_up 1\n\n")
 			_, _ = fmt.Fprintf(w, "# HELP ark_vault_build_info Build and version metadata.\n# TYPE ark_vault_build_info gauge\nark_vault_build_info{version=%q} 1\n\n", version)
-			_, _ = fmt.Fprintf(w, "# HELP ark_vault_uptime_seconds Process uptime in seconds.\n# TYPE ark_vault_uptime_seconds counter\nark_vault_uptime_seconds %.1f\n\n", uptime)
+			_, _ = fmt.Fprintf(w, "# HELP ark_vault_uptime_seconds Process uptime in seconds.\n# TYPE ark_vault_uptime_seconds gauge\nark_vault_uptime_seconds %.1f\n\n", uptime)
 			_, _ = fmt.Fprintf(w, "# HELP ark_vault_goroutines Current goroutine count.\n# TYPE ark_vault_goroutines gauge\nark_vault_goroutines %d\n\n", runtime.NumGoroutine())
 			_, _ = fmt.Fprintf(w, "# HELP ark_vault_memory_alloc_bytes Heap alloc in bytes.\n# TYPE ark_vault_memory_alloc_bytes gauge\nark_vault_memory_alloc_bytes %d\n\n", mem.Alloc)
 			_, _ = fmt.Fprintf(w, "# HELP ark_vault_updates_total Telegram updates processed.\n# TYPE ark_vault_updates_total counter\nark_vault_updates_total %d\n\n", m.UpdatesTotal)

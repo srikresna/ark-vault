@@ -9,6 +9,19 @@ import (
 	"github.com/arkcode369/ark-vault/internal/service"
 )
 
+// escapeHTML escapes the characters Telegram's HTML parse mode treats as
+// markup. User-controlled text (symbols, confluence, notes, display names, AI
+// output) MUST pass through this before being embedded in an HTML message,
+// otherwise sendMessage fails with "can't parse entities" and the message is
+// silently dropped.
+func escapeHTML(s string) string {
+	return strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+	).Replace(s)
+}
+
 // FormatStats formats member stats as an HTML Telegram message.
 func FormatStats(username string, s *domain.Stats) string {
 	return FormatStatsWithPeriod(username, "all", s)
@@ -35,12 +48,12 @@ func FormatStatsWithFilter(username string, f domain.StatsFilter, s *domain.Stat
 	var sb strings.Builder
 	scope := periodLabel(f.Period)
 	if f.Symbol != "" {
-		scope += " • " + f.Symbol
+		scope += " • " + escapeHTML(f.Symbol)
 	}
 	if f.Session != "" {
 		scope += " • " + string(f.Session)
 	}
-	fmt.Fprintf(&sb, "📊 <b>Stats — @%s (%s)</b>\n\n", username, scope)
+	fmt.Fprintf(&sb, "📊 <b>Stats — @%s (%s)</b>\n\n", escapeHTML(username), scope)
 	fmt.Fprintf(&sb, "Total trades: <b>%d</b>\n", s.TotalTrades)
 	fmt.Fprintf(&sb, "Win/Loss/BE: <b>%d</b>/%d/%d\n", s.Wins, s.Losses, s.BreakEvens)
 	if s.OpenTrades > 0 {
@@ -91,7 +104,7 @@ func FormatStatsWithFilter(username string, f domain.StatsFilter, s *domain.Stat
 	if len(s.TopSymbols) > 0 {
 		sb.WriteString("\n<b>Top Pairs:</b>\n")
 		for _, sym := range s.TopSymbols {
-			fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n", sym.Symbol, sym.Total, sym.WinRate, sym.TotalRR)
+			fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n", escapeHTML(sym.Symbol), sym.Total, sym.WinRate, sym.TotalRR)
 		}
 	}
 
@@ -173,10 +186,10 @@ func FormatLeaderboardWithPeriod(entries []service.LeaderboardEntry, metric, per
 		}
 		if metric == "rr" {
 			fmt.Fprintf(&sb, "%s <b>@%s</b> — %+.1fR (%d trades)\n",
-				rank, name, e.TotalRR, e.TotalTrades)
+				rank, escapeHTML(name), e.TotalRR, e.TotalTrades)
 		} else {
 			fmt.Fprintf(&sb, "%s <b>@%s</b> — %.1f%% WR (%d trades)\n",
-				rank, name, e.WinRate, e.TotalTrades)
+				rank, escapeHTML(name), e.WinRate, e.TotalTrades)
 		}
 	}
 
@@ -191,7 +204,7 @@ func FormatLeaderboardWithPeriod(entries []service.LeaderboardEntry, metric, per
 func FormatTradeConfirmation(t *domain.Trade) string {
 	var sb strings.Builder
 	sb.WriteString("✅ <b>Trade berhasil dicatat!</b>\n\n")
-	fmt.Fprintf(&sb, "Symbol: <b>%s</b> (%s)\n", t.Symbol, t.AssetType.String())
+	fmt.Fprintf(&sb, "Symbol: <b>%s</b> (%s)\n", escapeHTML(t.Symbol), t.AssetType.String())
 	fmt.Fprintf(&sb, "Direction: <b>%s</b>\n", t.Direction)
 	fmt.Fprintf(&sb, "Status: <b>%s</b>", t.Status)
 	if t.ResultRR != 0 {
@@ -202,7 +215,7 @@ func FormatTradeConfirmation(t *domain.Trade) string {
 		fmt.Fprintf(&sb, "Session: <b>%s</b>\n", t.TimeWindow)
 	}
 	if t.Confluence != "" {
-		fmt.Fprintf(&sb, "Confluence: %s\n", t.Confluence)
+		fmt.Fprintf(&sb, "Confluence: %s\n", escapeHTML(t.Confluence))
 	}
 	return sb.String()
 }
@@ -220,7 +233,7 @@ func FormatWeeklySummary(s *service.WeeklySummary) string {
 	fmt.Fprintf(&sb, "Community win rate: <b>%.1f%%</b>\n", s.CommunityWR)
 	fmt.Fprintf(&sb, "Total RR: <b>%+.1fR</b>\n", s.TotalRR)
 	if s.MostTraded != "" {
-		fmt.Fprintf(&sb, "Most traded: <b>%s</b>\n", s.MostTraded)
+		fmt.Fprintf(&sb, "Most traded: <b>%s</b>\n", escapeHTML(s.MostTraded))
 	}
 
 	if len(s.TopPerformers) > 0 {
@@ -236,7 +249,7 @@ func FormatWeeklySummary(s *service.WeeklySummary) string {
 				name = e.FirstName
 			}
 			fmt.Fprintf(&sb, "%s @%s — %+.1fR (%.1f%% WR)\n",
-				medal, name, e.TotalRR, e.WinRate)
+				medal, escapeHTML(name), e.TotalRR, e.WinRate)
 		}
 	}
 
@@ -563,19 +576,19 @@ func FormatAnalytics(a *domain.TradeAnalytics) string {
 	fmt.Fprintf(&sb, "\U0001f4ca Berdasarkan <b>%d trades</b> (WR: %.1f%%, RR: %+.1f)\n\n", a.TotalTrades, a.WinRate, a.TotalRR)
 
 	if a.StrengthAnalysis != "" {
-		fmt.Fprintf(&sb, "\U0001f4aa <b>Kekuatan:</b>\n%s\n\n", a.StrengthAnalysis)
+		fmt.Fprintf(&sb, "\U0001f4aa <b>Kekuatan:</b>\n%s\n\n", escapeHTML(a.StrengthAnalysis))
 	}
 	if a.WeaknessAnalysis != "" {
-		fmt.Fprintf(&sb, "\u26a0\ufe0f <b>Kelemahan:</b>\n%s\n\n", a.WeaknessAnalysis)
+		fmt.Fprintf(&sb, "\u26a0\ufe0f <b>Kelemahan:</b>\n%s\n\n", escapeHTML(a.WeaknessAnalysis))
 	}
 	if a.PatternInsights != "" {
-		fmt.Fprintf(&sb, "\U0001f50d <b>Pola Trading:</b>\n%s\n\n", a.PatternInsights)
+		fmt.Fprintf(&sb, "\U0001f50d <b>Pola Trading:</b>\n%s\n\n", escapeHTML(a.PatternInsights))
 	}
 	if a.Recommendations != "" {
-		fmt.Fprintf(&sb, "\U0001f4a1 <b>Rekomendasi:</b>\n%s\n\n", a.Recommendations)
+		fmt.Fprintf(&sb, "\U0001f4a1 <b>Rekomendasi:</b>\n%s\n\n", escapeHTML(a.Recommendations))
 	}
 	if a.OverallAssessment != "" {
-		fmt.Fprintf(&sb, "\U0001f4dd <b>Penilaian:</b>\n%s\n", a.OverallAssessment)
+		fmt.Fprintf(&sb, "\U0001f4dd <b>Penilaian:</b>\n%s\n", escapeHTML(a.OverallAssessment))
 	}
 
 	fmt.Fprintf(&sb, "\n<i>Generated: %s (cache 24h)</i>", a.GeneratedAt.Format("02 Jan 15:04"))
@@ -607,12 +620,12 @@ func FormatMonthlyReportCard(r *domain.MonthlyReportCard) string {
 	if len(r.AssetBreakdown) > 0 {
 		sb.WriteString("\n<b>Per Asset:</b>\n")
 		for asset, stats := range r.AssetBreakdown {
-			fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n", asset, stats.Total, stats.WinRate, stats.TotalRR)
+			fmt.Fprintf(&sb, "  %s: %d trades, %.1f%% WR, %+.1fR\n", escapeHTML(asset), stats.Total, stats.WinRate, stats.TotalRR)
 		}
 	}
 
 	if r.AISummary != "" {
-		fmt.Fprintf(&sb, "\n\U0001f916 <b>AI Summary:</b>\n%s\n", r.AISummary)
+		fmt.Fprintf(&sb, "\n\U0001f916 <b>AI Summary:</b>\n%s\n", escapeHTML(r.AISummary))
 	}
 
 	if r.TotalTrades == 0 {
@@ -645,7 +658,7 @@ func FormatOpenTrades(trades []domain.Trade) (string, [][]InlineButton) {
 	var rows [][]InlineButton
 	for i := range limit {
 		t := trades[i]
-		fmt.Fprintf(&sb, "<b>#%d</b> %s <b>%s</b> (%s)", i+1, t.Date.Format("02 Jan"), t.Symbol, t.Direction)
+		fmt.Fprintf(&sb, "<b>#%d</b> %s <b>%s</b> (%s)", i+1, t.Date.Format("02 Jan"), escapeHTML(t.Symbol), t.Direction)
 		if t.TimeWindow != "" {
 			fmt.Fprintf(&sb, " • %s", t.TimeWindow)
 		}
@@ -694,9 +707,10 @@ func FormatHistoryPage(trades []domain.Trade, page int, pageSize int) (string, [
 			rrStr = fmt.Sprintf(" (%+.1fR)", t.ResultRR)
 		}
 		fmt.Fprintf(&sb, "<b>#%d</b> • %s • <b>%s</b> %s — <b>%s</b>%s\n",
-			num, t.Date.Format("02 Jan"), t.Symbol, t.Direction, t.Status, rrStr)
+			num, t.Date.Format("02 Jan"), escapeHTML(t.Symbol), t.Direction, t.Status, rrStr)
 		if t.TimeWindow != "" || t.Confluence != "" {
-			fmt.Fprintf(&sb, "   <i>%s %s</i>\n", t.TimeWindow, t.Confluence)
+			meta := strings.TrimSpace(escapeHTML(string(t.TimeWindow)) + " " + escapeHTML(t.Confluence))
+			fmt.Fprintf(&sb, "   <i>%s</i>\n", meta)
 		}
 		if t.ID != "" {
 			rows = append(rows, []InlineButton{
@@ -726,11 +740,11 @@ func FormatHistoryPage(trades []domain.Trade, page int, pageSize int) (string, [
 func FormatEditTradeMenu(t *domain.Trade) (string, [][]InlineButton) {
 	var sb strings.Builder
 	sb.WriteString("✏️ <b>Edit Trade</b>\n\n")
-	fmt.Fprintf(&sb, "Symbol: <b>%s</b> (%s)\n", t.Symbol, t.AssetType.String())
+	fmt.Fprintf(&sb, "Symbol: <b>%s</b> (%s)\n", escapeHTML(t.Symbol), t.AssetType.String())
 	fmt.Fprintf(&sb, "Direction: <b>%s</b>\n", t.Direction)
 	fmt.Fprintf(&sb, "Status: <b>%s</b> (%+.1fR)\n", t.Status, t.ResultRR)
 	fmt.Fprintf(&sb, "Session: <b>%s</b>\n", t.TimeWindow)
-	fmt.Fprintf(&sb, "Confluence: %s\n\n", t.Confluence)
+	fmt.Fprintf(&sb, "Confluence: %s\n\n", escapeHTML(t.Confluence))
 	sb.WriteString("Pilih bagian yang ingin diubah:")
 
 	rows := [][]InlineButton{

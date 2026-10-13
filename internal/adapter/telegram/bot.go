@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -157,10 +159,15 @@ type CallbackQuery struct {
 }
 
 func (b *Bot) getUpdates(ctx context.Context) ([]Update, error) {
-	url := fmt.Sprintf("%s%s/getUpdates?offset=%d&timeout=30&allowed_updates=[\"message\",\"callback_query\"]",
-		telegramAPI, b.token, b.offset)
+	// Build the query with url.Values so the JSON payload is properly
+	// percent-encoded instead of relying on the server's leniency.
+	q := url.Values{}
+	q.Set("offset", strconv.Itoa(b.offset))
+	q.Set("timeout", "30")
+	q.Set("allowed_updates", `["message","callback_query"]`)
+	pollURL := fmt.Sprintf("%s%s/getUpdates?%s", telegramAPI, b.token, q.Encode())
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
 	if err != nil {
 		return nil, err
 	}

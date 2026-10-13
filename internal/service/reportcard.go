@@ -66,9 +66,10 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 	// Calculate stats
 	var wins, losses, breakEvens int
 	var totalRR, bestTrade, worstTrade float64
+	bestInit := false
 	assetMap := make(map[string]*reportAssetAccumulator)
 
-	for i, tr := range monthTrades {
+	for _, tr := range monthTrades {
 		switch tr.Status {
 		case domain.StatusWin:
 			wins++
@@ -79,15 +80,20 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		}
 		totalRR += tr.ResultRR
 
-		if i == 0 {
-			bestTrade = tr.ResultRR
-			worstTrade = tr.ResultRR
-		} else {
-			if tr.ResultRR > bestTrade {
+		// Best/worst only over decisive results (WIN/LOSS): an OPEN trade's
+		// 0R is not a trading result and must not show up as best or worst.
+		if tr.Status == domain.StatusWin || tr.Status == domain.StatusLoss {
+			if !bestInit {
 				bestTrade = tr.ResultRR
-			}
-			if tr.ResultRR < worstTrade {
 				worstTrade = tr.ResultRR
+				bestInit = true
+			} else {
+				if tr.ResultRR > bestTrade {
+					bestTrade = tr.ResultRR
+				}
+				if tr.ResultRR < worstTrade {
+					worstTrade = tr.ResultRR
+				}
 			}
 		}
 
@@ -194,16 +200,23 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		AssetBreakdown: assetBreakdown,
 	}
 
-	// Generate AI summary if trades exist and AI is available
+	// Generate AI summary if trades exist and AI is available. A failed AI
+	// call must NOT be cached: the report would freeze with an empty summary
+	// until the underlying inputs changed, so retry on the next request.
+	aiFailed := false
 	if totalTrades > 0 && s.ai != nil {
 		summary, err := s.generateAISummary(ctx, report)
 		if err == nil {
 			report.AISummary = summary
+		} else {
+			aiFailed = true
 		}
 	}
 
 	// Cache the report
-	_ = s.store.SaveReportCard(ctx, report)
+	if !aiFailed {
+		_ = s.store.SaveReportCard(ctx, report)
+	}
 
 	return report, nil
 }

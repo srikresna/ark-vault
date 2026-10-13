@@ -90,6 +90,12 @@ func commandCatalog() []Command {
 			Run:  func(h *Handler, ctx context.Context, msg *Message, _ string) { h.cmdUndo(ctx, msg) },
 		},
 		{
+			Name: "cancel", Group: groupTrade,
+			Desc: "Batalkan flow jurnal / edit",
+			Help: []string{"/cancel — Batalkan guided flow atau sesi edit yang sedang aktif"},
+			Run:  func(h *Handler, ctx context.Context, msg *Message, _ string) { h.cmdCancel(ctx, msg) },
+		},
+		{
 			Name: "stats", Group: groupStats,
 			Desc: "Statistik trading (all/week/month/pair/session)",
 			Help: []string{

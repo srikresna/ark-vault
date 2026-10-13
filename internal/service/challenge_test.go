@@ -140,6 +140,57 @@ func TestChallengeService_Standings_NegativeOnlyBestRR(t *testing.T) {
 	}
 }
 
+// TestChallengeService_HighestWRCountsClosedTradesOnly pins the invariant that
+// the win-rate challenge denominator excludes OPEN trades (consistent with
+// domain.CalculateStats) and that the min-3 gate counts closed trades.
+func TestChallengeService_HighestWRCountsClosedTradesOnly(t *testing.T) {
+	store := newMockChallengeStore()
+	tradesRepo := newMockGamificationTradeRepo()
+	membersRepo := newMockGamificationMemberRepo()
+	gamStore := newMockGamificationStore()
+	gamSvc := NewGamificationService(gamStore)
+	badgeSvc := NewBadgeService(newMockBadgeStore(), tradesRepo, gamSvc)
+	svc := NewChallengeService(store, tradesRepo, membersRepo, gamSvc, badgeSvc)
+
+	ctx := context.Background()
+	now := time.Now().In(timeutil.WIB)
+
+	// alice: 2W + 2OPEN -> only 2 closed trades, below the min-3 gate.
+	// bob: 2W + 1L + 2OPEN -> 3 closed, WR = 66.7% (not 40%).
+	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 1, Username: "alice"})
+	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 2, Username: "bob"})
+	tradesRepo.trades[1] = []domain.Trade{
+		{Date: now, Status: domain.StatusWin, ResultRR: 1},
+		{Date: now, Status: domain.StatusWin, ResultRR: 1},
+		{Date: now, Status: domain.StatusOpen},
+		{Date: now, Status: domain.StatusOpen},
+	}
+	tradesRepo.trades[2] = []domain.Trade{
+		{Date: now, Status: domain.StatusWin, ResultRR: 1},
+		{Date: now, Status: domain.StatusWin, ResultRR: 1},
+		{Date: now, Status: domain.StatusLoss, ResultRR: -1},
+		{Date: now, Status: domain.StatusOpen},
+		{Date: now, Status: domain.StatusOpen},
+	}
+
+	ch := &domain.WeeklyChallenge{
+		YearWeek:  domain.YearWeekString(now),
+		Type:      domain.ChallengeHighestWR,
+		StartDate: now.Add(-time.Hour),
+		EndDate:   now.Add(time.Hour),
+	}
+	standings, err := svc.GetCurrentStandings(ctx, ch)
+	if err != nil {
+		t.Fatalf("GetCurrentStandings failed: %v", err)
+	}
+	if len(standings) != 1 || standings[0].TelegramID != 2 {
+		t.Fatalf("expected only bob (3 closed trades) in standings, got %+v", standings)
+	}
+	if math.Abs(standings[0].Value-200.0/3.0) > 1e-9 {
+		t.Fatalf("bob WR = %.2f%%, want 66.67%% (2 wins over 3 closed, OPEN excluded)", standings[0].Value)
+	}
+}
+
 // TestChallengeService_FinalizeIsIdempotentAndWIBNormalised verifies that:
 // 1. GetOrCreateChallenge normalises a UTC timestamp to WIB before deriving the week;
 // 2. FinalizeChallenge persists Finalized=true before awarding XP and never double-awards

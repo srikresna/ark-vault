@@ -39,6 +39,9 @@ type GamificationStore interface {
 	SaveStreak(ctx context.Context, streak *domain.StreakData) error
 	AppendXPEvent(ctx context.Context, event *domain.XPEvent) error
 	GetXPEvents(ctx context.Context, telegramID int64, since time.Time) ([]domain.XPEvent, error)
+	GetTradeXPGrant(ctx context.Context, telegramID int64, tradeID string) (*domain.TradeXPGrant, error)
+	SaveTradeXPGrant(ctx context.Context, grant *domain.TradeXPGrant) error
+	DeleteTradeXPGrant(ctx context.Context, telegramID int64, tradeID string) error
 }
 
 // BadgeStore provides storage for badge awards.

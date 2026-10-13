@@ -2,6 +2,8 @@ package notion
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -200,5 +202,81 @@ func TestTradeRepo_ParseSingleTrade_ConcatenatesMultiSegmentRichText(t *testing.
 	}
 	if tr.Notes != "Part 1 - Part 2" {
 		t.Errorf("Notes = %q, want %q", tr.Notes, "Part 1 - Part 2")
+	}
+}
+
+// TestTradeRepo_ParseSingleTrade_CreatedTime pins the same-day tie-breaker
+// used by /undo: the Notion page creation time must be parsed onto the trade.
+func TestTradeRepo_ParseSingleTrade_CreatedTime(t *testing.T) {
+	repo := NewTradeRepo(NewClient("token"), nil)
+	tr, err := repo.parseSingleTrade([]byte(`{
+		"id":"t-ct",
+		"created_time":"2026-10-12T09:30:00.000Z",
+		"properties":{"Symbol":{"title":[{"plain_text":"XAUUSD"}]}}
+	}`))
+	if err != nil {
+		t.Fatalf("parseSingleTrade failed: %v", err)
+	}
+	want := time.Date(2026, 10, 12, 9, 30, 0, 0, time.UTC)
+	if !tr.CreatedAt.Equal(want) {
+		t.Errorf("CreatedAt = %v, want %v", tr.CreatedAt, want)
+	}
+}
+
+// TestTradeRepo_UpdateTradeClearsOptionalProperties pins the regression where
+// an update could never clear Time Window/Confluence/Notes because empty
+// values were simply omitted from the PATCH payload, leaving the old value in
+// Notion forever.
+func TestTradeRepo_UpdateTradeClearsOptionalProperties(t *testing.T) {
+	var payload map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &payload)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"t-clear"}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient("token")
+	client.baseURL = srv.URL + "/v1"
+	repo := NewTradeRepo(client, NewMemberRepo(client, "parent-1"))
+
+	err := repo.UpdateTrade(context.Background(), 555, &domain.Trade{
+		ID:        "t-clear",
+		Symbol:    "XAUUSD",
+		AssetType: domain.AssetGold,
+		Direction: domain.DirBuy,
+		Status:    domain.StatusBE,
+		ResultRR:  0,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTrade failed: %v", err)
+	}
+
+	props, ok := payload["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("PATCH payload has no properties: %+v", payload)
+	}
+	tw, ok := props["Time Window"].(map[string]interface{})
+	if !ok || tw["select"] != nil {
+		t.Errorf("Time Window on update must clear with select:null, got %+v", props["Time Window"])
+	}
+	conf, ok := props["Confluence"].(map[string]interface{})
+	if !ok || len(conf["rich_text"].([]interface{})) != 0 {
+		t.Errorf("Confluence on update must clear with an empty rich_text, got %+v", props["Confluence"])
+	}
+	notes, ok := props["Notes"].(map[string]interface{})
+	if !ok || len(notes["rich_text"].([]interface{})) != 0 {
+		t.Errorf("Notes on update must clear with an empty rich_text, got %+v", props["Notes"])
+	}
+
+	// A create must still omit the empty optionals instead of clearing them.
+	create := repo.buildTradeProperties(&domain.Trade{
+		Symbol: "XAUUSD", AssetType: domain.AssetGold, Direction: domain.DirBuy, Status: domain.StatusOpen,
+	}, false)
+	for _, key := range []string{"Time Window", "Confluence", "Notes"} {
+		if _, present := create[key]; present {
+			t.Errorf("create payload must omit empty %s, got %+v", key, create[key])
+		}
 	}
 }

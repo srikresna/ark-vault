@@ -120,16 +120,23 @@ func (s *ChallengeService) GetCurrentStandings(ctx context.Context, challenge *d
 				}
 			}
 		case domain.ChallengeHighestWR:
-			if len(weekTrades) < 3 {
-				continue // minimum 3 trades required
-			}
-			var wins int
+			// Win rate over closed trades only (WIN+LOSS+BE), consistent with
+			// domain.CalculateStats; counting OPEN trades in the denominator
+			// deflated everyone's score and made the min-3 gate unfair.
+			var wins, closed int
 			for _, t := range weekTrades {
-				if t.Status == domain.StatusWin {
+				switch t.Status {
+				case domain.StatusWin:
 					wins++
+					closed++
+				case domain.StatusLoss, domain.StatusBE:
+					closed++
 				}
 			}
-			value = float64(wins) / float64(len(weekTrades)) * 100
+			if closed < 3 {
+				continue // minimum 3 closed trades required
+			}
+			value = float64(wins) / float64(closed) * 100
 		case domain.ChallengeMostRR:
 			for _, t := range weekTrades {
 				value += t.ResultRR

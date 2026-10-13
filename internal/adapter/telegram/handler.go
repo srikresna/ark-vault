@@ -207,6 +207,12 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 	return true
 }
 
+// isJournalMessage reports whether the text is a passive #journal entry.
+// Case-insensitive to match the parser's `(?i)^#journal` tag.
+func isJournalMessage(text string) bool {
+	return strings.HasPrefix(strings.ToLower(text), "#journal")
+}
+
 // HandleUpdate processes a single Telegram update.
 func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 	atomic.AddUint64(&h.metricUpdatesTotal, 1)
@@ -233,7 +239,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 	}
 
 	// Rate limiting for commands and #journal submissions
-	if msg.From != nil && h.limiter != nil && (strings.HasPrefix(text, "/") || strings.HasPrefix(text, "#journal")) {
+	if msg.From != nil && h.limiter != nil && (strings.HasPrefix(text, "/") || isJournalMessage(text)) {
 		if !h.limiter.Allow(msg.From.ID) {
 			atomic.AddUint64(&h.metricRateLimitedTotal, 1)
 			_, _ = h.sender.SendText(ctx, msg.Chat.ID, "⏳ Terlalu banyak request. Coba lagi nanti.", msg.MessageThreadID)
@@ -245,13 +251,16 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 		return
 	}
 
-	// Check if user is in a guided session and this is a free-text input step
+	// Check if user is in a guided session and this is a free-text input step.
+	// Slash commands always escape to normal routing (so /cancel and /help
+	// work mid-flow), and #journal entries must never be swallowed by a
+	// pending prompt — previously the whole journal text became the answer.
 	if msg.From != nil {
-		if editSess := h.getEditSession(msg.From.ID); editSess != nil && !strings.HasPrefix(text, "/") {
+		if editSess := h.getEditSession(msg.From.ID); editSess != nil && !strings.HasPrefix(text, "/") && !isJournalMessage(text) {
 			h.handleTradeEditInput(ctx, msg, editSess)
 			return
 		}
-		if session := h.guided.Get(msg.From.ID); session != nil {
+		if session := h.guided.Get(msg.From.ID); session != nil && !strings.HasPrefix(text, "/") {
 			h.handleGuidedInput(ctx, msg, session)
 			return
 		}
@@ -261,7 +270,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 	if h.dispatchCommand(ctx, msg, text) {
 		return
 	}
-	if strings.HasPrefix(text, "#journal") {
+	if isJournalMessage(text) {
 		h.handleTextJournal(ctx, msg, text)
 	}
 }
@@ -288,9 +297,13 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 		return
 	}
 
-	// Handle attached photo
+	// Handle attached photo. The reference must land on trade.ScreenshotURL
+	// BEFORE the gamification call below, or the screenshot XP bonus never
+	// sees it.
 	if len(msg.Photo) > 0 && trade.ID != "" && h.bot != nil {
-		h.uploadPhoto(ctx, msg.Photo, trade.ID)
+		if ref := h.uploadPhoto(ctx, msg.Photo, trade.ID); ref != "" {
+			trade.ScreenshotURL = ref
+		}
 	}
 
 	h.notifyTradeRecorded(ctx, msg.From.ID, trade, msg.Chat.ID, msg.MessageThreadID)
@@ -344,12 +357,10 @@ func (h *Handler) cmdJournal(ctx context.Context, msg *Message) {
 	session := h.guided.Start(msg.From.ID, msg.Chat.ID, msg.MessageThreadID)
 	text, btns := StepPrompt(session)
 	rows := convertButtons(btns)
-	msgID, err := h.sender.SendWithKeyboard(ctx, msg.Chat.ID, text, rows, msg.MessageThreadID)
-	if err != nil {
+	if _, err := h.sender.SendWithKeyboard(ctx, msg.Chat.ID, text, rows, msg.MessageThreadID); err != nil {
 		h.logger.Error("send guided prompt", "error", err)
-		return
+		h.guided.Remove(msg.From.ID)
 	}
-	session.MsgID = msgID
 }
 
 // cmdStats shows personal or another member's stats with optional period, symbol, and session filters.
@@ -737,11 +748,9 @@ func (h *Handler) handleGuidedInput(ctx context.Context, msg *Message, session *
 	promptText, btns := StepPrompt(session)
 	rows := convertButtons(btns)
 	if len(rows) > 0 {
-		msgID, _ := h.sender.SendWithKeyboard(ctx, msg.Chat.ID, promptText, rows, session.ThreadID)
-		session.MsgID = msgID
+		_, _ = h.sender.SendWithKeyboard(ctx, msg.Chat.ID, promptText, rows, session.ThreadID)
 	} else {
-		msgID, _ := h.sender.SendHTML(ctx, msg.Chat.ID, promptText, session.ThreadID)
-		session.MsgID = msgID
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, promptText, session.ThreadID)
 	}
 }
 
@@ -768,32 +777,41 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 		return
 	}
 
-	// Upload screenshot if provided
+	// Upload screenshot if provided. The reference is stored on the trade
+	// before gamification runs so the screenshot XP bonus is granted and the
+	// trade-XP grant reflects it.
 	if session.PhotoFileID != "" && trade.ID != "" && h.bot != nil {
-		h.uploadPhoto(ctx, []PhotoSize{{FileID: session.PhotoFileID}}, trade.ID)
+		if ref := h.uploadPhoto(ctx, []PhotoSize{{FileID: session.PhotoFileID}}, trade.ID); ref != "" {
+			trade.ScreenshotURL = ref
+		}
 	}
 
 	h.notifyTradeRecorded(ctx, from.ID, trade, session.ChatID, session.ThreadID)
 	h.guided.Remove(from.ID)
 }
 
-// uploadPhoto downloads a photo from Telegram and attaches it to the trade's Notion page.
-func (h *Handler) uploadPhoto(ctx context.Context, photos []PhotoSize, tradeID string) {
+// uploadPhoto downloads a photo from Telegram, attaches it to the trade's
+// Notion page, and returns the Notion file reference ("" when the upload did
+// not happen or failed — failures are logged, the trade itself stands).
+func (h *Handler) uploadPhoto(ctx context.Context, photos []PhotoSize, tradeID string) string {
 	if len(photos) == 0 || h.bot == nil {
-		return
+		return ""
 	}
 	// Use the largest photo
 	photo := photos[len(photos)-1]
 	fileData, err := h.bot.GetFile(ctx, photo.FileID)
 	if err != nil {
 		h.logger.Error("download file", "error", err)
-		return
+		return ""
 	}
 	// Pass the file content to Notion - the token is no longer exposed in URLs
 	filename := fmt.Sprintf("screenshot_%s.jpg", tradeID)
-	if err := h.svc.Journal.UploadScreenshot(ctx, tradeID, filename, fileData); err != nil {
+	ref, err := h.svc.Journal.UploadScreenshot(ctx, tradeID, filename, fileData)
+	if err != nil {
 		h.logger.Error("upload screenshot", "error", err)
+		return ""
 	}
+	return ref
 }
 
 // convertButtons converts guided button types to InlineButton rows.
@@ -981,8 +999,10 @@ func (h *Handler) cmdReportCard(ctx context.Context, msg *Message) {
 		return
 	}
 
-	// Use previous month by default, or current if specified
-	now := time.Now()
+	// Use previous month by default, or current if specified.
+	// Evaluated in WIB so the month boundary matches the user's calendar,
+	// not the server's clock.
+	now := time.Now().In(timeutil.WIB)
 	yearMonth := now.AddDate(0, -1, 0).Format("2006-01") // last month
 
 	// Check if user wants current month: /reportcard current
@@ -1157,8 +1177,40 @@ func (h *Handler) cmdUndo(ctx context.Context, msg *Message) {
 		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "📭 Belum ada trade untuk di-undo.", msg.MessageThreadID)
 		return
 	}
+	// Most recent by journal date; Notion's created time breaks ties between
+	// trades recorded on the same day (the date sort alone is arbitrary there).
 	latest := trades[0]
+	for _, t := range trades[1:] {
+		switch {
+		case t.Date.After(latest.Date):
+			latest = t
+		case t.Date.Equal(latest.Date) && t.CreatedAt.After(latest.CreatedAt):
+			latest = t
+		}
+	}
 	h.deleteTradeAndNotify(ctx, msg.From.ID, &latest, msg.Chat.ID, msg.MessageThreadID)
+}
+
+// cmdCancel aborts any active guided journal flow or pending edit prompt so a
+// user is never trapped in a 15-minute session.
+func (h *Handler) cmdCancel(ctx context.Context, msg *Message) {
+	if msg.From == nil {
+		return
+	}
+	cancelled := false
+	if h.guided.Get(msg.From.ID) != nil {
+		h.guided.Remove(msg.From.ID)
+		cancelled = true
+	}
+	if h.getEditSession(msg.From.ID) != nil {
+		h.removeEditSession(msg.From.ID)
+		cancelled = true
+	}
+	if cancelled {
+		_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, "❌ Flow dibatalkan.", msg.MessageThreadID)
+		return
+	}
+	_, _ = h.sender.SendText(ctx, msg.Chat.ID, "Tidak ada flow atau sesi edit yang aktif.", msg.MessageThreadID)
 }
 
 func (h *Handler) deleteTradeAndNotify(ctx context.Context, userID int64, trade *domain.Trade, chatID int64, threadID int) {
@@ -1174,7 +1226,7 @@ func (h *Handler) deleteTradeAndNotify(ctx context.Context, userID int64, trade 
 		}
 	}
 	msg := fmt.Sprintf("🗑 Trade <b>%s %s</b> (%s) berhasil dihapus dari jurnal &amp; Notion.%s",
-		trade.Symbol, trade.Direction, trade.Status, xpNote)
+		escapeHTML(trade.Symbol), trade.Direction, trade.Status, xpNote)
 	_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
 }
 
@@ -1193,7 +1245,7 @@ func (h *Handler) applyTradeUpdate(ctx context.Context, userID int64, oldTrade, 
 	}
 	revengeWarn := h.checkRevengeWarning(ctx, userID, newTrade)
 	msg := fmt.Sprintf("✅ <b>Trade berhasil diperbarui!</b>\n\nSymbol: <b>%s</b> (%s)\nDirection: <b>%s</b>\nStatus: <b>%s</b> (%+.1fR)%s%s",
-		newTrade.Symbol, newTrade.AssetType.String(), newTrade.Direction, newTrade.Status, newTrade.ResultRR, xpNote, revengeWarn)
+		escapeHTML(newTrade.Symbol), newTrade.AssetType.String(), newTrade.Direction, newTrade.Status, newTrade.ResultRR, xpNote, revengeWarn)
 	_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
 }
 
@@ -1238,7 +1290,7 @@ func (h *Handler) handleTradeActionCallback(ctx context.Context, cb *CallbackQue
 				ChatID:   chatID,
 				ThreadID: threadID,
 			})
-			_, _ = h.sender.SendHTML(ctx, chatID, fmt.Sprintf("📊 Masukkan jumlah RR untuk <b>%s</b> (WIN) (contoh: 2, 1.5):", oldTrade.Symbol), threadID)
+			_, _ = h.sender.SendHTML(ctx, chatID, fmt.Sprintf("📊 Masukkan jumlah RR untuk <b>%s</b> (WIN) (contoh: 2, 1.5):", escapeHTML(oldTrade.Symbol)), threadID)
 		case "loss":
 			newTrade.Status = domain.StatusLoss
 			h.setEditSession(userID, &TradeEditSession{
@@ -1249,7 +1301,7 @@ func (h *Handler) handleTradeActionCallback(ctx context.Context, cb *CallbackQue
 				ChatID:   chatID,
 				ThreadID: threadID,
 			})
-			_, _ = h.sender.SendHTML(ctx, chatID, fmt.Sprintf("📊 Masukkan jumlah RR untuk <b>%s</b> (LOSS) (contoh: 1, 1.5):", oldTrade.Symbol), threadID)
+			_, _ = h.sender.SendHTML(ctx, chatID, fmt.Sprintf("📊 Masukkan jumlah RR untuk <b>%s</b> (LOSS) (contoh: 1, 1.5):", escapeHTML(oldTrade.Symbol)), threadID)
 		}
 		return true
 

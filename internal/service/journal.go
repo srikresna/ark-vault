@@ -58,13 +58,15 @@ func (s *JournalService) RecordTrade(ctx context.Context, memberTgID int64, user
 	return nil
 }
 
-// UploadScreenshot attaches a screenshot to an existing trade entry.
-func (s *JournalService) UploadScreenshot(ctx context.Context, tradeID string, filename string, data []byte) error {
+// UploadScreenshot attaches a screenshot to an existing trade entry and
+// returns the Notion file reference. The caller stores it on the trade so the
+// gamification screenshot bonus (and later XP reconciliation) can see it.
+func (s *JournalService) UploadScreenshot(ctx context.Context, tradeID string, filename string, data []byte) (string, error) {
 	if s.images == nil {
-		return nil // image store not configured
+		return "", nil // image store not configured
 	}
-	_, err := s.images.Upload(ctx, tradeID, filename, data)
-	return err
+	ref, err := s.images.Upload(ctx, tradeID, filename, data)
+	return ref, err
 }
 
 // GetMemberStats retrieves all trades for a member and calculates stats.

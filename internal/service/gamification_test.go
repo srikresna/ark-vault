@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ type mockGamificationStore struct {
 	profiles map[int64]*domain.GamificationProfile
 	streaks  map[int64]*domain.StreakData
 	events   map[int64][]domain.XPEvent
+	grants   map[string]*domain.TradeXPGrant
 }
 
 func newMockGamificationStore() *mockGamificationStore {
@@ -22,7 +24,12 @@ func newMockGamificationStore() *mockGamificationStore {
 		profiles: make(map[int64]*domain.GamificationProfile),
 		streaks:  make(map[int64]*domain.StreakData),
 		events:   make(map[int64][]domain.XPEvent),
+		grants:   make(map[string]*domain.TradeXPGrant),
 	}
+}
+
+func grantKey(telegramID int64, tradeID string) string {
+	return fmt.Sprintf("%d:%s", telegramID, tradeID)
 }
 
 func (m *mockGamificationStore) GetProfile(ctx context.Context, telegramID int64) (*domain.GamificationProfile, error) {
@@ -66,6 +73,25 @@ func (m *mockGamificationStore) GetXPEvents(ctx context.Context, telegramID int6
 		}
 	}
 	return out, nil
+}
+
+func (m *mockGamificationStore) GetTradeXPGrant(_ context.Context, telegramID int64, tradeID string) (*domain.TradeXPGrant, error) {
+	if g, ok := m.grants[grantKey(telegramID, tradeID)]; ok {
+		cp := *g
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+func (m *mockGamificationStore) SaveTradeXPGrant(_ context.Context, grant *domain.TradeXPGrant) error {
+	cp := *grant
+	m.grants[grantKey(grant.TelegramID, grant.TradeID)] = &cp
+	return nil
+}
+
+func (m *mockGamificationStore) DeleteTradeXPGrant(_ context.Context, telegramID int64, tradeID string) error {
+	delete(m.grants, grantKey(telegramID, tradeID))
+	return nil
 }
 
 type mockGamificationTradeRepo struct {
@@ -237,6 +263,114 @@ func TestGamificationService_AdjustXPForTradeChange(t *testing.T) {
 	}
 	if delta != -20 || prof.TotalXP != 5 {
 		t.Errorf("expected delta=-20 and TotalXP=5 after deleting trade, got delta=%d TotalXP=%d", delta, prof.TotalXP)
+	}
+}
+
+// TestGamificationService_AdjustXPForTradeChange_RespectsDailyCap pins the
+// regression where deleting a trade that was recorded after the daily cap had
+// been reached subtracted XP the member never received.
+func TestGamificationService_AdjustXPForTradeChange_RespectsDailyCap(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	memberID := int64(4242)
+
+	record := func(id string) *domain.Trade {
+		tr := &domain.Trade{
+			ID:       id,
+			Date:     time.Now().In(timeutil.WIB),
+			Symbol:   "XAUUSD",
+			Status:   domain.StatusWin,
+			ResultRR: 1.0,
+		}
+		if _, err := svc.OnTradeRecorded(ctx, memberID, tr); err != nil {
+			t.Fatalf("OnTradeRecorded(%s) failed: %v", id, err)
+		}
+		return tr
+	}
+
+	// Fill the daily cap with three trades...
+	for i := 1; i <= domain.MaxDailyTradeXPCount; i++ {
+		record(fmt.Sprintf("t-%d", i))
+	}
+	xpAtCap, _ := svc.GetProfile(ctx, memberID)
+
+	// ...then record a fourth: it earns nothing under the cap.
+	capped := record("t-4")
+	prof, _ := svc.GetProfile(ctx, memberID)
+	if prof.TotalXP != xpAtCap.TotalXP {
+		t.Fatalf("4th trade should earn 0 XP, got %d -> %d", xpAtCap.TotalXP, prof.TotalXP)
+	}
+
+	// Deleting the capped trade must not subtract anything.
+	_, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, capped, nil)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange failed: %v", err)
+	}
+	if delta != 0 {
+		t.Errorf("deleting a capped trade should adjust 0 XP, got %d", delta)
+	}
+	prof, _ = svc.GetProfile(ctx, memberID)
+	if prof.TotalXP != xpAtCap.TotalXP {
+		t.Errorf("TotalXP after capped-trade delete = %d, want %d", prof.TotalXP, xpAtCap.TotalXP)
+	}
+
+	// Deleting an uncapped trade still subtracts what was granted (10 base).
+	first := &domain.Trade{ID: "t-1", Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 1.0}
+	_, delta, err = svc.AdjustXPForTradeChange(ctx, memberID, first, nil)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange failed: %v", err)
+	}
+	if delta != -(domain.XPTradeLogged + domain.XPWinBonus) {
+		t.Errorf("deleting an uncapped WIN trade should adjust %d, got %d", -(domain.XPTradeLogged + domain.XPWinBonus), delta)
+	}
+}
+
+// TestGamificationService_ScreenshotXPAwardedAndSticky verifies that a trade
+// with an attached screenshot earns the screenshot bonus, and that the bonus
+// survives edits (edits cannot remove a screenshot, so it is never reconciled).
+func TestGamificationService_ScreenshotXPAwardedAndSticky(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	memberID := int64(31337)
+
+	withShot := &domain.Trade{
+		ID:            "t-shot",
+		Date:          time.Now().In(timeutil.WIB),
+		Symbol:        "XAUUSD",
+		Status:        domain.StatusLoss,
+		ResultRR:      -1.0,
+		ScreenshotURL: "file-upload-ref-1",
+	}
+	res, err := svc.OnTradeRecorded(ctx, memberID, withShot)
+	if err != nil {
+		t.Fatalf("OnTradeRecorded failed: %v", err)
+	}
+	wantXP := domain.XPTradeLogged + domain.XPScreenshot + domain.XPDailyStreak
+	if res.XPGained != wantXP {
+		t.Fatalf("XPGained = %d, want %d (log + screenshot + streak)", res.XPGained, wantXP)
+	}
+
+	grant, err := store.GetTradeXPGrant(ctx, memberID, "t-shot")
+	if err != nil || grant == nil {
+		t.Fatalf("expected trade XP grant to be persisted, got %v, %v", grant, err)
+	}
+	if grant.Base != domain.XPTradeLogged || grant.Screenshot != domain.XPScreenshot {
+		t.Fatalf("grant = %+v, want Base=%d Screenshot=%d", grant, domain.XPTradeLogged, domain.XPScreenshot)
+	}
+
+	// Edit the trade's RR (newTrade has no ScreenshotURL because edits never
+	// carry one): the screenshot bonus must NOT be clawed back.
+	edited := &domain.Trade{ID: "t-shot", Symbol: "XAUUSD", Status: domain.StatusLoss, ResultRR: -2.0}
+	_, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, withShot, edited)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange failed: %v", err)
+	}
+	if delta != 0 {
+		t.Errorf("LOSS RR edit changes no XP (bonus stays), got delta %d", delta)
 	}
 }
 

@@ -38,6 +38,7 @@ type Trade struct {
 	ID            string // Notion page ID of the trade entry
 	MemberID      int64  // Telegram user ID
 	Date          time.Time
+	CreatedAt     time.Time // Notion page creation time; tie-breaker for "latest trade"
 	AssetType     AssetType
 	Symbol        string
 	Direction     Direction

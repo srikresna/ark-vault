@@ -75,6 +75,17 @@ func (s *Scheduler) MarkAndCheck(jobName string, t time.Time) bool {
 func (s *Scheduler) runJob(ctx context.Context, job Job) {
 	s.logger.Info("scheduler: job registered", "name", job.Name, "interval", job.Interval)
 
+	// Run once immediately at startup. The hourly ticker below fires on the
+	// process-start anniversary of each hour, so without this a job whose
+	// trigger hour is between start and the first tick would be missed for a
+	// full hour (e.g. the 20:00 reminder when the bot starts at 20:30).
+	// MarkAndCheck still deduplicates within the clock-hour; the only cost is
+	// that a restart within an already-fired hour may re-fire that hour's job.
+	if ctx.Err() == nil {
+		s.logger.Info("scheduler: running job", "name", job.Name, "reason", "startup")
+		s.executeJobSafely(ctx, job)
+	}
+
 	ticker := time.NewTicker(job.Interval)
 	defer ticker.Stop()
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,5 +216,144 @@ func TestHandler_EditSessionSweepAndClose(t *testing.T) {
 	}
 	if !activePresent {
 		t.Errorf("expected active edit session for user 200 to be present")
+	}
+}
+
+// TestEscapeHTML pins the Telegram HTML parse-mode contract: user-controlled
+// text must have &, < and > escaped or sendMessage is rejected outright.
+func TestEscapeHTML(t *testing.T) {
+	got := escapeHTML(`S&D demand <15m "OB" & FVG`)
+	want := `S&amp;D demand &lt;15m "OB" &amp; FVG`
+	if got != want {
+		t.Errorf("escapeHTML = %q, want %q", got, want)
+	}
+	if escapeHTML(FormatTradeConfirmation(&domain.Trade{Symbol: "<b>", Status: domain.StatusOpen, AssetType: domain.AssetForex})) == "" {
+		t.Error("escaped confirmation should still render")
+	}
+	if !strings.Contains(FormatTradeConfirmation(&domain.Trade{Symbol: "XAU<USD", AssetType: domain.AssetGold, Status: domain.StatusWin, ResultRR: 2}), "XAU&lt;USD") {
+		t.Error("confirmation must escape the symbol")
+	}
+}
+
+// TestHandler_GuidedFlowDoesNotSwallowCommands pins the regression where an
+// active guided session captured slash commands as free-text input (turning
+// "/help" into the trade symbol), leaving no way to escape the flow.
+func TestHandler_GuidedFlowDoesNotSwallowCommands(t *testing.T) {
+	var sent []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		_ = json.Unmarshal(body, &payload)
+		if text, ok := payload["text"].(string); ok {
+			mu.Lock()
+			sent = append(sent, text)
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":11}}`))
+	}))
+	defer srv.Close()
+
+	sender := NewSender("test-token")
+	sender.baseAPI = srv.URL + "/bot"
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewHandler(sender, Services{}, nil, nil, nil, NewRateLimiter(100, time.Minute), logger, 0, 0)
+	defer h.Close()
+
+	ctx := context.Background()
+	uid := int64(77)
+	upd := func(text string) Update {
+		return Update{Message: &Message{
+			From: &User{ID: uid, Username: "trader"},
+			Chat: &Chat{ID: uid, Type: "private"},
+			Text: text,
+		}}
+	}
+
+	session := h.guided.Start(uid, uid, 0)
+	session.Trade = domain.Trade{AssetType: domain.AssetForex}
+
+	// A slash command mid-flow routes normally instead of becoming the symbol.
+	h.HandleUpdate(ctx, upd("/help"))
+	mu.Lock()
+	last := sent[len(sent)-1]
+	mu.Unlock()
+	if !strings.Contains(last, "ARK Vault — Help") {
+		t.Fatalf("/help during guided flow was swallowed, last message: %q", last)
+	}
+	if h.guided.Get(uid) == nil {
+		t.Fatal("guided session should survive unrelated commands")
+	}
+
+	// /cancel aborts the flow.
+	h.HandleUpdate(ctx, upd("/cancel"))
+	if h.guided.Get(uid) != nil {
+		t.Fatal("/cancel should remove the guided session")
+	}
+	mu.Lock()
+	last = sent[len(sent)-1]
+	mu.Unlock()
+	if !strings.Contains(last, "dibatalkan") {
+		t.Fatalf("/cancel should confirm cancellation, got %q", last)
+	}
+}
+
+// TestHandler_EditSessionDoesNotSwallowJournal pins the regression where a
+// pending edit prompt consumed the next #journal message and stored its whole
+// text as the new symbol.
+func TestHandler_EditSessionDoesNotSwallowJournal(t *testing.T) {
+	var sent []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		_ = json.Unmarshal(body, &payload)
+		if text, ok := payload["text"].(string); ok {
+			mu.Lock()
+			sent = append(sent, text)
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":12}}`))
+	}))
+	defer srv.Close()
+
+	sender := NewSender("test-token")
+	sender.baseAPI = srv.URL + "/bot"
+	tradeRepo := newMockFeatureTradeRepo()
+	memberRepo := &mockResettableMemberRepo{}
+	journalSvc := service.NewJournalService(tradeRepo, memberRepo, nil)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewHandler(sender, Services{Journal: journalSvc}, nil, tradeRepo, memberRepo, NewRateLimiter(100, time.Minute), logger, 0, 0)
+	defer h.Close()
+
+	ctx := context.Background()
+	uid := int64(88)
+	h.setEditSession(uid, &TradeEditSession{
+		TradeID:  "t-1",
+		OldTrade: domain.Trade{ID: "t-1", Symbol: "XAUUSD"},
+		NewTrade: domain.Trade{ID: "t-1", Symbol: "XAUUSD"},
+		Field:    EditFieldSymbol,
+		ChatID:   uid,
+	})
+
+	h.HandleUpdate(ctx, Update{Message: &Message{
+		From: &User{ID: uid, Username: "trader"},
+		Chat: &Chat{ID: uid, Type: "private"},
+		Text: "#journal\nPair: EURUSD\nType: BUY\nRR: +2",
+	}})
+
+	// The journal entry must have been recorded...
+	saved := tradeRepo.trades[uid]
+	if len(saved) != 1 || saved[0].Symbol != "EURUSD" || saved[0].Status != domain.StatusWin {
+		t.Fatalf("#journal was not recorded independently of the edit session, got %+v", saved)
+	}
+	// ...and the pending edit session must still be waiting for its answer.
+	if h.getEditSession(uid) == nil {
+		t.Fatal("edit session should not be consumed by a #journal message")
+	}
+	if tradeRepo.updated != nil {
+		t.Fatalf("edit session must not apply an update from a #journal message, got %+v", tradeRepo.updated)
 	}
 }

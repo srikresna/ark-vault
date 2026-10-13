@@ -115,16 +115,20 @@ func CalculateStats(trades []Trade) Stats {
 			rrCount++
 		}
 
-		if !bestInit {
-			s.BestRR = t.ResultRR
-			s.WorstRR = t.ResultRR
-			bestInit = true
-		} else {
-			if t.ResultRR > s.BestRR {
+		// Best/worst only over decisive results: an OPEN or BE trade's 0R must
+		// never surface as the member's best or worst result.
+		if t.Status == StatusWin || t.Status == StatusLoss {
+			if !bestInit {
 				s.BestRR = t.ResultRR
-			}
-			if t.ResultRR < s.WorstRR {
 				s.WorstRR = t.ResultRR
+				bestInit = true
+			} else {
+				if t.ResultRR > s.BestRR {
+					s.BestRR = t.ResultRR
+				}
+				if t.ResultRR < s.WorstRR {
+					s.WorstRR = t.ResultRR
+				}
 			}
 		}
 

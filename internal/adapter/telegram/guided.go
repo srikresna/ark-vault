@@ -32,7 +32,6 @@ type GuidedSession struct {
 	Trade       domain.Trade
 	ChatID      int64
 	ThreadID    int
-	MsgID       int // last bot message ID, for editing
 	PhotoURL    string
 	PhotoFileID string
 	Submitting  bool // prevents double submit
@@ -174,7 +173,7 @@ func buildConfirmText(s *GuidedSession) string {
 	var sb strings.Builder
 	sb.WriteString("📋 <b>Konfirmasi Trade:</b>\n\n")
 	fmt.Fprintf(&sb, "Asset: <b>%s</b>\n", t.AssetType.String())
-	fmt.Fprintf(&sb, "Symbol: <b>%s</b>\n", t.Symbol)
+	fmt.Fprintf(&sb, "Symbol: <b>%s</b>\n", escapeHTML(t.Symbol))
 	fmt.Fprintf(&sb, "Direction: <b>%s</b>\n", t.Direction)
 	fmt.Fprintf(&sb, "Status: <b>%s</b>\n", t.Status)
 	if t.Status == domain.StatusWin || t.Status == domain.StatusLoss {
@@ -184,7 +183,7 @@ func buildConfirmText(s *GuidedSession) string {
 		fmt.Fprintf(&sb, "Session: <b>%s</b>\n", t.TimeWindow)
 	}
 	if t.Confluence != "" {
-		fmt.Fprintf(&sb, "Confluence: <b>%s</b>\n", t.Confluence)
+		fmt.Fprintf(&sb, "Confluence: <b>%s</b>\n", escapeHTML(t.Confluence))
 	}
 	if s.PhotoURL != "" || s.PhotoFileID != "" {
 		sb.WriteString("Screenshot: ✅ attached\n")

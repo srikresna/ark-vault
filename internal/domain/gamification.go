@@ -27,3 +27,16 @@ type XPEvent struct {
 	Reason     string    `json:"reason"`
 	Timestamp  time.Time `json:"timestamp"`
 }
+
+// TradeXPGrant records the trade-intrinsic XP that was actually granted for a
+// single trade, so a later edit or delete can reconcile exactly what was
+// awarded. This matters because the daily trade-XP cap may have granted
+// nothing at record time; subtracting the full base XP then would claw back
+// XP the member never received.
+type TradeXPGrant struct {
+	TelegramID int64     `json:"telegram_id"`
+	TradeID    string    `json:"trade_id"`
+	Base       int       `json:"base"`       // XPTradeLogged + win bonus actually granted
+	Screenshot int       `json:"screenshot"` // XPScreenshot bonus actually granted
+	GrantedAt  time.Time `json:"granted_at"`
+}

@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
+	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
 
 // PDFExporter generates a simple text-based PDF report.
@@ -24,7 +26,9 @@ func (e *PDFExporter) ExportPDF(_ context.Context, username string, trades []dom
 
 	content.WriteString("ARK Vault — Trade Journal Report\n")
 	fmt.Fprintf(&content, "Member: @%s\n", username)
-	fmt.Fprintf(&content, "Generated: %s\n", trades[0].Date.Format("2006-01-02"))
+	// The generation timestamp is the report date; it must not depend on the
+	// first trade's date (and must not panic on an empty slice).
+	fmt.Fprintf(&content, "Generated: %s\n", time.Now().In(timeutil.WIB).Format("2006-01-02"))
 	content.WriteString(strings.Repeat("=", 50) + "\n\n")
 
 	// Stats summary
