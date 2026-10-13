@@ -83,13 +83,15 @@ golangci-lint run ./...
 
 Every push to `main` runs: **commitlint** (Conventional Commits are mandatory) → **govulncheck** + **golangci-lint** → **tests with coverage gate (40%)** → **binary build** → **Docker image** → **deploy**.
 
-The deploy job SSHes into the production host, pulls the commit, rebuilds the container, and waits up to 2 minutes for the Docker healthcheck; if the new build is unhealthy it automatically rolls back to the previous commit. To enable it, configure repository secrets:
+The deploy job runs on a **self-hosted runner installed on the production host** (the box is tailnet-only behind NAT, so GitHub-hosted runners cannot reach it). The job pulls the commit, rebuilds the container, and waits up to 2 minutes for the Docker healthcheck; if the new build is unhealthy it automatically rolls back to the previous commit. Setting up the runner:
 
-| Secret | Value |
-|---|---|
-| `SSH_HOST` | production host address |
-| `SSH_KEY` | private key whose public counterpart is in the host's `authorized_keys` |
-| `SSH_USERNAME` | optional, defaults to `kresna` |
-| `SSH_PORT` | optional, defaults to `22` |
+```bash
+# on the production host (one-time)
+mkdir ~/actions-runner && cd ~/actions-runner
+curl -sL -o runner.tgz https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64-2.338.0.tar.gz
+tar xzf runner.tgz && rm runner.tgz
+./config.sh --url https://github.com/srikresna/ark-vault --token <registration-token> --labels ark-deploy --unattended
+nohup ./run.sh > runner.log 2>&1 &   # plus a @reboot crontab entry
+```
 
-Without these secrets the deploy step is skipped and CI stays green.
+No SSH secrets, tailnet joins, or inbound ports are involved — the job executes locally on the box.

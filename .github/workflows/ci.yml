@@ -198,59 +198,38 @@ jobs:
 
   deploy:
     name: Deploy to Production
-    runs-on: ubuntu-latest
+    # The production host is tailnet-only (CGNAT address, no public IPv4), so
+    # GitHub-hosted runners cannot SSH into it. A self-hosted runner lives on
+    # the production box itself: this job executes locally, with no SSH
+    # credentials, tailnet joins, or inbound ports involved.
+    runs-on: [self-hosted, ark-deploy]
     needs: [build, docker]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
-      # The production host is tailnet-only (CGNAT address, no public IPv4),
-      # so GitHub-hosted runners cannot reach its SSH port directly. When a
-      # Tailscale auth key is configured the runner joins the tailnet first;
-      # until then the deploy step below stays skipped to keep CI green.
-      - name: Join tailnet
-        env:
-          TS_KEY: ${{ secrets.TS_AUTHKEY }}
-        if: env.TS_KEY != ''
-        uses: tailscale/github-action@v3
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          args: --accept-risk=lose-server --hostname=ark-vault-ci
-
-      # The secrets context is not allowed directly in a step-level `if`, so
-      # gate on an env value populated from secrets instead. Deploy requires
-      # the tailnet key in addition to the SSH credentials.
-      - name: Deploy via SSH
-        env:
-          SSH_DEPLOY_ENABLED: ${{ secrets.SSH_HOST != '' && secrets.SSH_KEY != '' && secrets.TS_AUTHKEY != '' }}
-        if: env.SSH_DEPLOY_ENABLED == 'true'
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USERNAME || 'kresna' }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          script: |
-            set -e
-            cd /home/kresna/ark-vault
-            PREV_SHA=$(git rev-parse HEAD)
-            git fetch origin main
-            git reset --hard origin/main
-            docker compose build --build-arg VERSION=${{ github.sha }}
-            docker compose up -d --force-recreate
-            # Health gate: wait up to 2 minutes for the container healthcheck,
-            # then roll back to the previous commit if the new build is sick.
-            ok=0
-            for i in $(seq 1 12); do
-              sleep 10
-              if [ "$(docker inspect ark-vault-bot --format '{{.State.Health.Status}}' 2>/dev/null)" = "healthy" ]; then
-                ok=1
-                break
-              fi
-            done
-            if [ "$ok" != "1" ]; then
-              echo "new deploy unhealthy; rolling back to $PREV_SHA"
-              git reset --hard "$PREV_SHA"
-              docker compose build --build-arg VERSION="$PREV_SHA"
-              docker compose up -d --force-recreate
-              exit 1
+      - name: Deploy and health-gate
+        run: |
+          set -e
+          cd "$HOME/ark-vault"
+          PREV_SHA=$(git rev-parse HEAD)
+          git fetch origin main
+          git reset --hard origin/main
+          docker compose build --build-arg VERSION=${{ github.sha }}
+          docker compose up -d --force-recreate
+          # Health gate: wait up to 2 minutes for the container healthcheck,
+          # then roll back to the previous commit if the new build is sick.
+          ok=0
+          for i in $(seq 1 12); do
+            sleep 10
+            if [ "$(docker inspect ark-vault-bot --format '{{.State.Health.Status}}' 2>/dev/null)" = "healthy" ]; then
+              ok=1
+              break
             fi
-            echo "deploy healthy"
+          done
+          if [ "$ok" != "1" ]; then
+            echo "new deploy unhealthy; rolling back to $PREV_SHA"
+            git reset --hard "$PREV_SHA"
+            docker compose build --build-arg VERSION="$PREV_SHA"
+            docker compose up -d --force-recreate
+            exit 1
+          fi
+          echo "deploy healthy"
