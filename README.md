@@ -11,6 +11,7 @@
   - `/open` — View and close open trades (`WIN`, `LOSS`, `BE`).
   - `/history` — Paginated trade history with inline edit and delete actions.
   - `/undo` — Delete the most recently recorded trade and reconcile XP.
+  - `/cancel` — Abort an in-progress guided flow or a pending edit prompt at any time.
 - **Analytics & Reports**:
   - `/stats [week|month] [pair] [session] [@username]` — Win rate, total/avg RR, expectancy, profit factor, max drawdown, per-asset/session breakdown, Unicode R-Curve (cumulative equity sparkline), and revenge-trading warnings.
   - `/leaderboard [week|month] [rr]` — Community Top 10 rankings.
