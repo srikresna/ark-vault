@@ -191,6 +191,51 @@ func TestChallengeService_HighestWRCountsClosedTradesOnly(t *testing.T) {
 	}
 }
 
+// TestChallengeService_BestRRIgnoresOpenTrades pins the invariant that an OPEN
+// trade's 0R can never win the RR Hunter challenge for a week of losses, and
+// that members with only OPEN/BE trades are not ranked at all.
+func TestChallengeService_BestRRIgnoresOpenTrades(t *testing.T) {
+	store := newMockChallengeStore()
+	tradesRepo := newMockGamificationTradeRepo()
+	membersRepo := newMockGamificationMemberRepo()
+	gamStore := newMockGamificationStore()
+	gamSvc := NewGamificationService(gamStore)
+	badgeSvc := NewBadgeService(newMockBadgeStore(), tradesRepo, gamSvc)
+	svc := NewChallengeService(store, tradesRepo, membersRepo, gamSvc, badgeSvc)
+
+	ctx := context.Background()
+	now := time.Now().In(timeutil.WIB)
+
+	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 1, Username: "loser"})
+	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 2, Username: "ghost"})
+	tradesRepo.trades[1] = []domain.Trade{
+		{Date: now, Status: domain.StatusLoss, ResultRR: -1.0},
+		{Date: now, Status: domain.StatusLoss, ResultRR: -2.0},
+		{Date: now, Status: domain.StatusOpen},
+	}
+	tradesRepo.trades[2] = []domain.Trade{
+		{Date: now, Status: domain.StatusOpen},
+		{Date: now, Status: domain.StatusBE},
+	}
+
+	ch := &domain.WeeklyChallenge{
+		YearWeek:  domain.YearWeekString(now),
+		Type:      domain.ChallengeBestRR,
+		StartDate: now.Add(-time.Hour),
+		EndDate:   now.Add(time.Hour),
+	}
+	standings, err := svc.GetCurrentStandings(ctx, ch)
+	if err != nil {
+		t.Fatalf("GetCurrentStandings failed: %v", err)
+	}
+	if len(standings) != 1 || standings[0].TelegramID != 1 {
+		t.Fatalf("expected only member 1 (has decisive trades), got %+v", standings)
+	}
+	if standings[0].Value != -1.0 {
+		t.Fatalf("best RR = %.1f, want -1.0 (the OPEN trade's 0R must not win)", standings[0].Value)
+	}
+}
+
 // TestChallengeService_FinalizeIsIdempotentAndWIBNormalised verifies that:
 // 1. GetOrCreateChallenge normalises a UTC timestamp to WIB before deriving the week;
 // 2. FinalizeChallenge persists Finalized=true before awarding XP and never double-awards

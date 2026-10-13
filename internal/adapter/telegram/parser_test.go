@@ -1,10 +1,43 @@
 package telegram
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
+
+// TestParseJournalMessage_TruncatesLongFields pins the guard against Notion
+// 400 errors: rich_text segments hold at most 2000 characters, so oversized
+// confluence/notes/symbol values are truncated before they reach the API.
+func TestParseJournalMessage_TruncatesLongFields(t *testing.T) {
+	long := strings.Repeat("A", 5000)
+	input := "#journal\nPair: " + long + "\nType: BUY\nRR: +1\nConfluence: " + long + "\nNotes: " + long
+
+	result := ParseJournalMessage(input)
+	if result.Err != "" {
+		t.Fatalf("unexpected error: %s", result.Err)
+	}
+	if got := len([]rune(result.Trade.Symbol)); got > maxSymbolLen {
+		t.Errorf("symbol length = %d, want <= %d", got, maxSymbolLen)
+	}
+	if got := len([]rune(result.Trade.Confluence)); got != maxTextFieldLen {
+		t.Errorf("confluence length = %d, want exactly %d", got, maxTextFieldLen)
+	}
+	if got := len([]rune(result.Trade.Notes)); got != maxTextFieldLen {
+		t.Errorf("notes length = %d, want exactly %d", got, maxTextFieldLen)
+	}
+}
+
+// TestTruncateUTF8 does not split multi-byte characters.
+func TestTruncateUTF8(t *testing.T) {
+	if got := truncateUTF8("héllo wörld", 5); got != "héllo" {
+		t.Errorf("truncateUTF8 = %q, want %q", got, "héllo")
+	}
+	if got := truncateUTF8("short", 10); got != "short" {
+		t.Errorf("truncateUTF8 should keep short strings, got %q", got)
+	}
+}
 
 func TestParseJournalMessage_Valid(t *testing.T) {
 	input := `#journal

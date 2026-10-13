@@ -699,7 +699,7 @@ func (h *Handler) handleGuidedInput(ctx context.Context, msg *Message, session *
 
 	switch session.Step {
 	case StepSymbol:
-		session.Trade.Symbol = strings.ToUpper(strings.ReplaceAll(text, "/", ""))
+		session.Trade.Symbol = strings.ToUpper(strings.ReplaceAll(truncateUTF8(text, maxSymbolLen), "/", ""))
 		session.Step = StepDirection
 
 	case StepRRAmount:
@@ -724,7 +724,7 @@ func (h *Handler) handleGuidedInput(ctx context.Context, msg *Message, session *
 
 	case StepConfluence:
 		if strings.ToLower(text) != "skip" {
-			session.Trade.Confluence = text
+			session.Trade.Confluence = truncateUTF8(text, maxTextFieldLen)
 		}
 		session.Step = StepScreenshot
 
@@ -1437,10 +1437,10 @@ func (h *Handler) handleTradeEditInput(ctx context.Context, msg *Message, sess *
 	newTrade := sess.NewTrade
 	switch sess.Field {
 	case EditFieldSymbol:
-		newTrade.Symbol = strings.ToUpper(strings.ReplaceAll(text, "/", ""))
+		newTrade.Symbol = strings.ToUpper(strings.ReplaceAll(truncateUTF8(text, maxSymbolLen), "/", ""))
 		newTrade.AssetType = domain.DetectAssetType(newTrade.Symbol)
 	case EditFieldConfluence:
-		newTrade.Confluence = text
+		newTrade.Confluence = truncateUTF8(text, maxTextFieldLen)
 	case EditFieldResultRR:
 		v, err := strconv.ParseFloat(text, 64)
 		if err != nil {

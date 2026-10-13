@@ -27,7 +27,11 @@ services:
         max-size: "10m"
         max-file: "3"
     ports:
-      - "9102:9102"
+      # Bound to host loopback only: /metrics and /healthz must not be
+      # reachable from outside the box. Prometheus scrapes the bot over the
+      # grafana_monitoring-net docker network (ark-vault-bot:9102), which is
+      # unaffected by this host binding.
+      - "127.0.0.1:9102:9102"
     volumes:
       - vault-data:/data/badger
     networks:

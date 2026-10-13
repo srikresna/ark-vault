@@ -11,7 +11,7 @@ import (
 )
 
 const defaultModel = "gemini-3.1-flash-lite-preview"
-const apiURL = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
+const apiURL = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
 
 // Analyzer implements ports.AIAnalyzer using Google Gemini.
 type Analyzer struct {
@@ -34,7 +34,10 @@ func NewAnalyzer(apiKey string, model string) *Analyzer {
 
 // AnalyzeTrades sends the prompt to Gemini and returns the response text.
 func (a *Analyzer) AnalyzeTrades(ctx context.Context, prompt string) (string, error) {
-	url := fmt.Sprintf(apiURL, a.model, a.apiKey)
+	// The API key travels in the x-goog-api-key header, not the query string:
+	// keys embedded in URLs end up in access logs, proxy logs and error
+	// messages.
+	url := fmt.Sprintf(apiURL, a.model)
 
 	reqBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
@@ -60,6 +63,7 @@ func (a *Analyzer) AnalyzeTrades(ctx context.Context, prompt string) (string, er
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", a.apiKey)
 
 	resp, err := a.client.Do(req)
 	if err != nil {

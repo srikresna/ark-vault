@@ -109,14 +109,22 @@ func (s *ChallengeService) GetCurrentStandings(ctx context.Context, challenge *d
 		}
 
 		var value float64
+		var hasCandidate bool
 		switch challenge.Type {
 		case domain.ChallengeMostTrades:
 			value = float64(len(weekTrades))
+			hasCandidate = true
 		case domain.ChallengeBestRR:
+			// Only decisive results count: an OPEN trade's 0R must not win
+			// "best RR" for a week of losing trades.
 			value = math.Inf(-1)
 			for _, t := range weekTrades {
+				if t.Status != domain.StatusWin && t.Status != domain.StatusLoss {
+					continue
+				}
 				if t.ResultRR > value {
 					value = t.ResultRR
+					hasCandidate = true
 				}
 			}
 		case domain.ChallengeHighestWR:
@@ -137,10 +145,15 @@ func (s *ChallengeService) GetCurrentStandings(ctx context.Context, challenge *d
 				continue // minimum 3 closed trades required
 			}
 			value = float64(wins) / float64(closed) * 100
+			hasCandidate = true
 		case domain.ChallengeMostRR:
 			for _, t := range weekTrades {
 				value += t.ResultRR
 			}
+			hasCandidate = true
+		}
+		if !hasCandidate {
+			continue // no qualifying trades this week
 		}
 
 		results = append(results, domain.ChallengeResult{

@@ -64,8 +64,12 @@ func TestAnalyzeTrades(t *testing.T) {
 				if !strings.Contains(req.URL.String(), "test-model") {
 					t.Errorf("expected URL to contain model name, got %s", req.URL.String())
 				}
-				if !strings.Contains(req.URL.String(), "test-key") {
-					t.Errorf("expected URL to contain API key, got %s", req.URL.String())
+				// The API key must travel in the header, never the URL.
+				if got := req.Header.Get("x-goog-api-key"); got != "test-key" {
+					t.Errorf("expected x-goog-api-key header %q, got %q", "test-key", got)
+				}
+				if strings.Contains(req.URL.String(), "test-key") {
+					t.Errorf("API key leaked into URL: %s", req.URL.String())
 				}
 
 				return &http.Response{

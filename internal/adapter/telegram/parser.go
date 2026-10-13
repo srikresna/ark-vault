@@ -15,6 +15,27 @@ var (
 	rrStatusRe = regexp.MustCompile(`(?i)^(WIN|LOSS|BE)\s*(\d+\.?\d*)?\s*(rr|r)?$`)
 )
 
+// Notion property limits: a rich_text segment holds at most 2000 characters
+// and titles are also capped. Truncating user input before it reaches the API
+// prevents hard 400 errors on very long confluence/notes/symbol values.
+const (
+	maxSymbolLen    = 64
+	maxTextFieldLen = 1900 // headroom below Notion's 2000-char limit
+)
+
+// truncateUTF8 cuts s to at most max runes without splitting a multi-byte
+// character.
+func truncateUTF8(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max])
+}
+
 // ParseResult holds the output of parsing a #journal message.
 type ParseResult struct {
 	Trade *domain.Trade
@@ -45,7 +66,7 @@ func ParseJournalMessage(text string) ParseResult {
 
 		switch {
 		case key == "pair" || key == "symbol":
-			t.Symbol = strings.ToUpper(strings.ReplaceAll(val, "/", ""))
+			t.Symbol = strings.ToUpper(strings.ReplaceAll(truncateUTF8(val, maxSymbolLen), "/", ""))
 			parsed["symbol"] = true
 		case key == "type" || key == "direction":
 			dir := strings.ToUpper(val)
@@ -63,10 +84,10 @@ func ParseJournalMessage(text string) ParseResult {
 			t.TimeWindow = parseSession(val)
 			parsed["session"] = true
 		case key == "confluence":
-			t.Confluence = val
+			t.Confluence = truncateUTF8(val, maxTextFieldLen)
 			parsed["confluence"] = true
 		case strings.HasPrefix(key, "note"):
-			t.Notes = val
+			t.Notes = truncateUTF8(val, maxTextFieldLen)
 		}
 	}
 
