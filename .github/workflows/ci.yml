@@ -144,8 +144,13 @@ jobs:
     needs: [build, docker]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
+      # The secrets context is not allowed directly in a step-level `if`, so
+      # gate on an env value populated from secrets instead. Skipping when the
+      # SSH secrets are not configured keeps CI green on forks.
       - name: Deploy via SSH
-        if: "${{ secrets.SSH_HOST != '' }}"
+        env:
+          SSH_DEPLOY_ENABLED: ${{ secrets.SSH_HOST != '' && secrets.SSH_KEY != '' }}
+        if: env.SSH_DEPLOY_ENABLED == 'true'
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.SSH_HOST }}
