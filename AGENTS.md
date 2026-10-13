@@ -1,8 +1,8 @@
-# Repository Guidelines
+﻿# Repository Guidelines
 
 ## Project Overview
 
-**ARK Vault** (`github.com/arkcode369/ark-vault`) is a community-focused Telegram bot written in Go 1.23 that automates trade journal recording into per-member Notion pages/databases, paired with a local BadgerDB gamification engine (XP, 10 levels, daily streaks, 13 badges, rotating weekly challenges, monthly goals, dual-mode reminders) and optional Google Gemini AI trade coaching (`/analyze`, `/reportcard`).
+**ARK Vault** (`github.com/arkcode369/ark-vault`) is a community-focused Telegram bot written in Go (minimum 1.25, toolchain 1.26) that automates trade journal recording into per-member Notion pages/databases, paired with a local BadgerDB gamification engine (XP, 10 levels, daily streaks, 13 badges, rotating weekly challenges, monthly goals, dual-mode reminders) and optional Google Gemini AI trade coaching (`/analyze`, `/reportcard`).
 
 ## Architecture & Data Flow
 
@@ -19,16 +19,16 @@ The codebase follows **Hexagonal Architecture (Ports & Adapters)** with idiomati
 
 ## Key Directories
 
-- `cmd/bot/` — Application entrypoint (`main.go`), manual dependency injection, signal handling (`SIGINT`/`SIGTERM`), and scheduled job definitions.
-- `internal/domain/` — Pure domain models and business rules with zero external/I/O dependencies (`trade.go`, `stats.go`, `xp.go`, `asset.go`, `gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `analytics.go`).
-- `internal/service/` — Use-case orchestration (`journal.go`, `gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `leaderboard.go`, `report.go`, `analytics.go`, `reportcard.go`) and consumer-side interfaces (`contracts.go`).
-- `internal/adapter/telegram/` — Telegram Bot API client (`bot.go`, `sender.go`), single-source command catalog (`commands.go`), update router (`handler.go`), `#journal` parser (`parser.go`), 9-step wizard (`guided.go`), HTML message builders (`formatter.go`), and sliding-window rate limiter (`ratelimit.go`).
-- `internal/adapter/notion/` — Notion REST client (`client.go`, API version `2022-06-28`), 3-tier member provisioning/lookup (`member.go`), cached trade CRUD (`trade.go`), and binary screenshot uploader (`image.go`).
-- `internal/adapter/badger/` — BadgerDB v4 wrapper with 5-minute value-log GC (`store.go`) and 9 repositories using the `gam:` key namespace (`gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `analytics.go`, `cache.go`).
-- `internal/adapter/exporter/` — Zero-dependency CSV exporter with formula-injection sanitization (`csv.go`) and minimal raw PDF generator (`pdf.go`).
-- `internal/adapter/gemini/` — Google Gemini `generateContent` REST client (`analyzer.go`).
-- `internal/scheduler/` — Hourly ticker with `MarkAndCheck(jobName, now)` clock-hour deduplication (`scheduler.go`).
-- `pkg/` — Shared stateless utilities (`pkg/timeutil/tz.go`).
+- `cmd/bot/` â€” Application entrypoint (`main.go`), manual dependency injection, signal handling (`SIGINT`/`SIGTERM`), and scheduled job definitions.
+- `internal/domain/` â€” Pure domain models and business rules with zero external/I/O dependencies (`trade.go`, `stats.go`, `xp.go`, `asset.go`, `gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `analytics.go`).
+- `internal/service/` â€” Use-case orchestration (`journal.go`, `gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `leaderboard.go`, `report.go`, `analytics.go`, `reportcard.go`) and consumer-side interfaces (`contracts.go`).
+- `internal/adapter/telegram/` â€” Telegram Bot API client (`bot.go`, `sender.go`), single-source command catalog (`commands.go`), update router (`handler.go`), `#journal` parser (`parser.go`), 9-step wizard (`guided.go`), HTML message builders (`formatter.go`), and sliding-window rate limiter (`ratelimit.go`).
+- `internal/adapter/notion/` â€” Notion REST client (`client.go`, API version `2022-06-28`), 3-tier member provisioning/lookup (`member.go`), cached trade CRUD (`trade.go`), and binary screenshot uploader (`image.go`).
+- `internal/adapter/badger/` â€” BadgerDB v4 wrapper with 5-minute value-log GC (`store.go`) and 9 repositories using the `gam:` key namespace (`gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `analytics.go`, `cache.go`).
+- `internal/adapter/exporter/` â€” Zero-dependency CSV exporter with formula-injection sanitization (`csv.go`) and minimal raw PDF generator (`pdf.go`).
+- `internal/adapter/gemini/` â€” Google Gemini `generateContent` REST client (`analyzer.go`).
+- `internal/scheduler/` â€” Hourly ticker with `MarkAndCheck(jobName, now)` clock-hour deduplication (`scheduler.go`).
+- `pkg/` â€” Shared stateless utilities (`pkg/timeutil/tz.go`).
 
 ## Development Commands
 
@@ -67,18 +67,18 @@ docker compose up -d --build
 
 ## Important Files
 
-- `cmd/bot/main.go` — Composition root and background scheduler wiring.
-- `internal/config/config.go` & `.env.example` — Environment variable parsing, validation, and defaults (`TELEGRAM_BOT_TOKEN`, `NOTION_TOKEN`, `NOTION_PARENT_PAGE_ID` required).
-- `internal/service/contracts.go` — Service-layer repository, store, and AI interfaces.
-- `internal/domain/xp.go` — XP reward constants, `MaxDailyTradeXPCount` (`3`), and the 10-level `LevelTable` (`0` to `50,000 XP`).
-- `internal/domain/stats.go` — `CalculateStats` (WinRate, Expectancy, ProfitFactor, `ByAsset`, `BySession`, `TopSymbols`), `FilterTradesByPeriod`, and `ConsecutiveLossesToday`.
-- `internal/adapter/telegram/handler.go` — Command/callback router, guided journaling, `/open` & `/history` interactive edit/delete flows, and `/reset`.
-- `internal/adapter/notion/member.go` & `trade.go` — Notion page/database auto-provisioning, child DB resolution, and cached trade CRUD.
-- `.github/workflows/ci.yml` — GitHub Actions CI/CD pipeline (`Lint`, `Test & Coverage`, `Build Binary`, `Build Docker Image`).
+- `cmd/bot/main.go` â€” Composition root and background scheduler wiring.
+- `internal/config/config.go` & `.env.example` â€” Environment variable parsing, validation, and defaults (`TELEGRAM_BOT_TOKEN`, `NOTION_TOKEN`, `NOTION_PARENT_PAGE_ID` required).
+- `internal/service/contracts.go` â€” Service-layer repository, store, and AI interfaces.
+- `internal/domain/xp.go` â€” XP reward constants, `MaxDailyTradeXPCount` (`3`), and the 10-level `LevelTable` (`0` to `50,000 XP`).
+- `internal/domain/stats.go` â€” `CalculateStats` (WinRate, Expectancy, ProfitFactor, `ByAsset`, `BySession`, `TopSymbols`), `FilterTradesByPeriod`, and `ConsecutiveLossesToday`.
+- `internal/adapter/telegram/handler.go` â€” Command/callback router, guided journaling, `/open` & `/history` interactive edit/delete flows, and `/reset`.
+- `internal/adapter/notion/member.go` & `trade.go` â€” Notion page/database auto-provisioning, child DB resolution, and cached trade CRUD.
+- `.github/workflows/ci.yml` â€” GitHub Actions CI/CD pipeline (`Lint`, `Test & Coverage`, `Build Binary`, `Build Docker Image`).
 
 ## Runtime & Tooling Preferences
 
-- **Runtime**: Go `1.23+` (`go 1.23.0` in `go.mod`; `golang:1.23-alpine` in `Dockerfile`).
+- **Runtime**: Go minimum `1.25` (`go 1.25.0` in `go.mod`, required by `x/net`); build toolchain `golang:1.26-alpine` in `Dockerfile` and CI `GO_VERSION=1.26` — Go 1.23/1.24 are EOL and no longer receive security patches, which fails the govulncheck CI gate.
 - **Stdlib-First Policy**: Keep `github.com/dgraph-io/badger/v4` as the sole direct dependency in `go.mod`. Use standard `net/http`, `encoding/json`, `mime/multipart`, and `log/slog` rather than adding third-party HTTP/bot/ORM frameworks.
 - **Container Constraints**: Production runs as non-root `appuser` on `alpine:3.20` with `/data/badger` mounted to a persistent volume and a `128M` memory limit (`docker-compose.yml`).
 
