@@ -61,7 +61,7 @@ jobs:
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           # Pinned: the floating "latest" once installed a binary built with
           # go1.24, which refuses to lint a go.mod targeting go >= 1.25.
