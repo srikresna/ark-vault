@@ -202,12 +202,25 @@ jobs:
     needs: [build, docker]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
+      # The production host is tailnet-only (CGNAT address, no public IPv4),
+      # so GitHub-hosted runners cannot reach its SSH port directly. When a
+      # Tailscale auth key is configured the runner joins the tailnet first;
+      # until then the deploy step below stays skipped to keep CI green.
+      - name: Join tailnet
+        env:
+          TS_KEY: ${{ secrets.TS_AUTHKEY }}
+        if: env.TS_KEY != ''
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          args: --accept-risk=lose-server --hostname=ark-vault-ci
+
       # The secrets context is not allowed directly in a step-level `if`, so
-      # gate on an env value populated from secrets instead. Skipping when the
-      # SSH secrets are not configured keeps CI green on forks.
+      # gate on an env value populated from secrets instead. Deploy requires
+      # the tailnet key in addition to the SSH credentials.
       - name: Deploy via SSH
         env:
-          SSH_DEPLOY_ENABLED: ${{ secrets.SSH_HOST != '' && secrets.SSH_KEY != '' }}
+          SSH_DEPLOY_ENABLED: ${{ secrets.SSH_HOST != '' && secrets.SSH_KEY != '' && secrets.TS_AUTHKEY != '' }}
         if: env.SSH_DEPLOY_ENABLED == 'true'
         uses: appleboy/ssh-action@v1.2.0
         with:
