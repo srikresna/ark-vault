@@ -7,7 +7,9 @@ on:
   pull_request:
 
 env:
-  GO_VERSION: '1.26'
+  # Pin the exact patch: a floating '1.26' once resolved to 1.26.3 whose
+  # stdlib still had open CVEs, failing the govulncheck gate.
+  GO_VERSION: '1.26.9'
   REGISTRY: ghcr.io
 
 jobs:
@@ -61,7 +63,9 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pinned: the floating "latest" once installed a binary built with
+          # go1.24, which refuses to lint a go.mod targeting go >= 1.25.
+          version: v2.13.1
           args: --timeout=5m
 
   vuln:

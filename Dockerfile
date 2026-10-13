@@ -1,4 +1,6 @@
-FROM golang:1.26-alpine AS builder
+# Pinned patch for reproducible, security-patched builds (floating tags once
+# gave us an EOL toolchain).
+FROM golang:1.26.9-alpine AS builder
 
 RUN apk --no-cache add git
 
