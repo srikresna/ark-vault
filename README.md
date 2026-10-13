@@ -1,6 +1,6 @@
 # ARK Vault
 
-**ARK Vault** is a community-focused Telegram bot written in Go 1.23 that automates trade journal recording into per-member Notion pages and inline databases, paired with a local BadgerDB gamification engine (XP, 10 career levels, daily streaks, 13 achievement badges, rotating weekly challenges, monthly goals, dual-mode reminders) and optional Google Gemini AI trade coaching (`/analyze`, `/reportcard`).
+**ARK Vault** is a community-focused Telegram bot written in Go (minimum 1.25, toolchain 1.26) that automates trade journal recording into per-member Notion pages and inline databases, paired with a local BadgerDB gamification engine (XP, 10 career levels, daily streaks, 13 achievement badges, rotating weekly challenges, monthly goals, dual-mode reminders) and optional Google Gemini AI trade coaching (`/analyze`, `/reportcard`).
 
 ## Features
 
@@ -77,3 +77,18 @@ go test -v -race ./...
 # Run linter
 golangci-lint run ./...
 ```
+
+## CI/CD
+
+Every push to `main` runs: **commitlint** (Conventional Commits are mandatory) → **govulncheck** + **golangci-lint** → **tests with coverage gate (40%)** → **binary build** → **Docker image** → **deploy**.
+
+The deploy job SSHes into the production host, pulls the commit, rebuilds the container, and waits up to 2 minutes for the Docker healthcheck; if the new build is unhealthy it automatically rolls back to the previous commit. To enable it, configure repository secrets:
+
+| Secret | Value |
+|---|---|
+| `SSH_HOST` | production host address |
+| `SSH_KEY` | private key whose public counterpart is in the host's `authorized_keys` |
+| `SSH_USERNAME` | optional, defaults to `kresna` |
+| `SSH_PORT` | optional, defaults to `22` |
+
+Without these secrets the deploy step is skipped and CI stays green.
