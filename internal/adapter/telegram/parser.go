@@ -51,6 +51,7 @@ func ParseJournalMessage(text string) ParseResult {
 
 	t := &domain.Trade{}
 	parsed := make(map[string]bool)
+	var invalidRR string
 
 	for _, line := range lines[1:] {
 		line = strings.TrimSpace(line)
@@ -78,7 +79,9 @@ func ParseJournalMessage(text string) ParseResult {
 			}
 			parsed["direction"] = true
 		case key == "rr" || key == "result":
-			parseRR(val, t)
+			if !parseRR(val, t) {
+				invalidRR = val
+			}
 			parsed["rr"] = true
 		case key == "session":
 			t.TimeWindow = parseSession(val)
@@ -107,21 +110,32 @@ func ParseJournalMessage(text string) ParseResult {
 		}
 	}
 
+	if invalidRR != "" {
+		// Err messages are rendered via SendHTML, so the echoed raw value
+		// must be entity-escaped or markup- and ampersand-bearing input
+		// breaks entity parsing and the member gets no feedback at all.
+		return ParseResult{
+			Err: "Format RR/Result tidak valid: \"" + escapeHTML(invalidRR) + "\"\n\n" +
+				"Gunakan salah satu dari:\n+2, -1, 0 (angka) atau WIN 2RR, LOSS 1, BE",
+		}
+	}
+
 	return ParseResult{Trade: t}
 }
 
-func parseRR(val string, t *domain.Trade) {
+func parseRR(val string, t *domain.Trade) bool {
+	trimmed := strings.TrimSpace(val)
 	// Try simple numeric: +2, -1, 0
-	if m := rrValueRe.FindStringSubmatch(strings.TrimSpace(val)); m != nil {
+	if m := rrValueRe.FindStringSubmatch(trimmed); m != nil {
 		if rr, err := strconv.ParseFloat(m[1], 64); err == nil {
 			t.ResultRR = rr
 			deriveStatusFromRR(t)
-			return
+			return true
 		}
 	}
 
 	// Try status format: WIN 2RR, LOSS 1RR, BE
-	if m := rrStatusRe.FindStringSubmatch(strings.TrimSpace(val)); m != nil {
+	if m := rrStatusRe.FindStringSubmatch(trimmed); m != nil {
 		switch strings.ToUpper(m[1]) {
 		case "WIN":
 			t.Status = domain.StatusWin
@@ -141,7 +155,11 @@ func parseRR(val string, t *domain.Trade) {
 			t.Status = domain.StatusBE
 			t.ResultRR = 0
 		}
+		return true
 	}
+	// Present but unparseable: the caller must reject the line instead of
+	// silently recording an OPEN 0R trade.
+	return false
 }
 
 func deriveStatusFromRR(t *domain.Trade) {
@@ -165,6 +183,9 @@ func parseSession(val string) domain.TimeWindow {
 	case "ny pm", "nypm", "ny_pm":
 		return domain.SessionNYPM
 	default:
-		return domain.TimeWindow(val)
+		// Free-text sessions are kept but bounded: Notion select options cap
+		// at 100 characters, and unbounded raw values are an injection vector
+		// into the CSV/HTML sinks downstream.
+		return domain.TimeWindow(truncateUTF8(strings.TrimSpace(val), 100))
 	}
 }

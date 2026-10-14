@@ -82,11 +82,30 @@ type Handler struct {
 	ownerID                int64
 	unauthMu               sync.Mutex
 	unauthNotified         map[int64]time.Time // per-user last owner-notification time
+	memberVerdictMu        sync.Mutex
+	memberVerdicts         map[int64]membershipVerdict // last known community-membership verdict per user
 	metricUpdatesTotal     uint64
 	metricCommandsTotal    uint64
 	metricCallbacksTotal   uint64
 	metricRateLimitedTotal uint64
 	metricPanicsTotal      uint64
+}
+
+const (
+	// membershipCacheTTL bounds how long a fresh verdict skips the
+	// getChatMember API call.
+	membershipCacheTTL = 10 * time.Minute
+	// membershipVerdictMaxAge is the stale-fallback ceiling: during a
+	// membership-API outage, verdicts younger than this keep their authority
+	// instead of the gate failing open.
+	membershipVerdictMaxAge = 24 * time.Hour
+)
+
+// membershipVerdict records the outcome of the last successful getChatMember
+// check for a user.
+type membershipVerdict struct {
+	isMember  bool
+	checkedAt time.Time
 }
 
 // NewHandler creates a Handler.
@@ -114,6 +133,7 @@ func NewHandler(
 		communityGroupID: communityGroupID,
 		ownerID:          ownerID,
 		unauthNotified:   make(map[int64]time.Time),
+		memberVerdicts:   make(map[int64]membershipVerdict),
 	}
 }
 
@@ -165,11 +185,27 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 	if h.communityGroupID == 0 || h.bot == nil {
 		return true // no community gate configured
 	}
+	// Fresh verdict short-circuits the API call (and bounds getChatMember
+	// traffic to one call per user per TTL).
+	if isMember, ok := h.cachedVerdict(userID, membershipCacheTTL); ok {
+		return isMember
+	}
 	isMember, err := h.bot.CheckChatMember(ctx, h.communityGroupID, userID)
 	if err != nil {
 		h.logger.Error("check membership failed", "error", err, "user_id", userID)
-		return true // fail open on API errors
+		// Prefer the last known verdict; when this user has never been
+		// verified, fail closed — an API outage must not grant non-members
+		// full access to the bot.
+		if isMember, ok := h.cachedVerdict(userID, membershipVerdictMaxAge); ok {
+			return isMember
+		}
+		if chatType == "private" {
+			_, _ = h.sender.SendText(ctx, chatID,
+				"⚠️ Gagal memverifikasi keanggotaan (layanan Telegram sedang bermasalah). Coba lagi beberapa saat lagi.", threadID)
+		}
+		return false
 	}
+	h.storeVerdict(userID, isMember)
 	if !isMember {
 		// Only send denial message in private chat — don't spam group chats
 		if chatType == "private" {
@@ -205,6 +241,33 @@ func (h *Handler) isAuthorized(ctx context.Context, userID int64, chatID int64, 
 		return false
 	}
 	return true
+}
+
+// cachedVerdict returns the stored membership verdict if one exists and is at
+// most maxAge old.
+func (h *Handler) cachedVerdict(userID int64, maxAge time.Duration) (isMember, ok bool) {
+	h.memberVerdictMu.Lock()
+	defer h.memberVerdictMu.Unlock()
+	v, found := h.memberVerdicts[userID]
+	if !found || time.Since(v.checkedAt) > maxAge {
+		return false, false
+	}
+	return v.isMember, true
+}
+
+// storeVerdict records a successful membership check and lazily prunes
+// entries past the stale-fallback ceiling so the map stays bounded by
+// recently active members.
+func (h *Handler) storeVerdict(userID int64, isMember bool) {
+	now := time.Now()
+	h.memberVerdictMu.Lock()
+	defer h.memberVerdictMu.Unlock()
+	h.memberVerdicts[userID] = membershipVerdict{isMember: isMember, checkedAt: now}
+	for id, v := range h.memberVerdicts {
+		if now.Sub(v.checkedAt) > membershipVerdictMaxAge {
+			delete(h.memberVerdicts, id)
+		}
+	}
 }
 
 // isJournalMessage reports whether the text is a passive #journal entry.
@@ -354,6 +417,10 @@ func (h *Handler) cmdJournal(ctx context.Context, msg *Message) {
 	if msg.From == nil {
 		return
 	}
+	// Flows are mutually exclusive per user: HandleUpdate checks the edit
+	// session first, so a pending edit session would swallow every guided
+	// answer (and an editf:symbol session would rewrite the old trade).
+	h.removeEditSession(msg.From.ID)
 	session := h.guided.Start(msg.From.ID, msg.Chat.ID, msg.MessageThreadID)
 	text, btns := StepPrompt(session)
 	rows := convertButtons(btns)
@@ -1003,7 +1070,7 @@ func (h *Handler) cmdReportCard(ctx context.Context, msg *Message) {
 	// Evaluated in WIB so the month boundary matches the user's calendar,
 	// not the server's clock.
 	now := time.Now().In(timeutil.WIB)
-	yearMonth := now.AddDate(0, -1, 0).Format("2006-01") // last month
+	yearMonth := timeutil.PreviousYearMonth(now) // last month, safe on the 29th–31st
 
 	// Check if user wants current month: /reportcard current
 	parts := strings.Fields(msg.Text)
@@ -1086,6 +1153,9 @@ func (h *Handler) checkRevengeWarning(ctx context.Context, userID int64, trade *
 }
 
 func (h *Handler) setEditSession(userID int64, sess *TradeEditSession) {
+	// Flows are mutually exclusive per user: a live guided flow would lose
+	// its answers to the newly pending edit session.
+	h.guided.Remove(userID)
 	h.editMu.Lock()
 	defer h.editMu.Unlock()
 	now := time.Now()
@@ -1221,7 +1291,15 @@ func (h *Handler) deleteTradeAndNotify(ctx context.Context, userID int64, trade 
 	}
 	xpNote := ""
 	if h.svc.Gamification != nil {
-		if prof, delta, err := h.svc.Gamification.AdjustXPForTradeChange(ctx, userID, trade, nil); err == nil && delta != 0 {
+		prof, delta, err := h.svc.Gamification.AdjustXPForTradeChange(ctx, userID, trade, nil)
+		switch {
+		case err != nil:
+			// The Notion trade is already gone; swallowing this error would
+			// let the stale TradeXPGrant silently poison every later XP
+			// reconciliation. Log it and tell the member.
+			h.logger.Error("adjust xp failed after trade delete", "error", err, "user_id", userID)
+			xpNote = "\n⚠️ <b>XP gagal disesuaikan</b> — hubungi admin bila total XP tidak sesuai."
+		case delta != 0:
 			xpNote = fmt.Sprintf("\n⚡ XP disesuaikan: <b>%+d XP</b> (Total: %d XP — Level %d %s)", delta, prof.TotalXP, prof.Level, prof.Title)
 		}
 	}
@@ -1238,7 +1316,12 @@ func (h *Handler) applyTradeUpdate(ctx context.Context, userID int64, oldTrade, 
 	}
 	xpNote := ""
 	if h.svc.Gamification != nil {
-		if prof, delta, err := h.svc.Gamification.AdjustXPForTradeChange(ctx, userID, oldTrade, newTrade); err == nil && delta != 0 {
+		prof, delta, err := h.svc.Gamification.AdjustXPForTradeChange(ctx, userID, oldTrade, newTrade)
+		switch {
+		case err != nil:
+			h.logger.Error("adjust xp failed after trade update", "error", err, "user_id", userID)
+			xpNote = "\n⚠️ <b>XP gagal disesuaikan</b> — hubungi admin bila total XP tidak sesuai."
+		case delta != 0:
 			xpNote = fmt.Sprintf("\n⚡ XP disesuaikan: <b>%+d XP</b> (Total: %d XP — Level %d %s)", delta, prof.TotalXP, prof.Level, prof.Title)
 		}
 		h.evaluatePostTradeRewards(ctx, userID, newTrade, chatID, threadID)

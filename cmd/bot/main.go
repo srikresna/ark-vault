@@ -155,15 +155,19 @@ func main() {
 	if cfg.ReportChatID != 0 {
 		sched.Add(scheduler.Job{
 			Name:     "weekly-report",
-			Interval: 1 * time.Hour, // check hourly
+			Interval: 10 * time.Minute, // 10-minute ticks + claim-on-success: transient failures retry within the window
 			Run: func(ctx context.Context) error {
 				now := time.Now().In(timeutil.WIB)
 				dayMatch := isDayOfWeek(now, cfg.ReportDay)
 				hourMatch := now.Hour() == cfg.ReportHour
-				if dayMatch && hourMatch && sched.MarkAndCheck("weekly-report", now) {
-					logger.Info("posting scheduled weekly report", "chat_id", cfg.ReportChatID, "thread_id", cfg.ReportThreadID)
-					return handler.SendScheduledReport(ctx, cfg.ReportChatID, cfg.ReportThreadID)
+				if !dayMatch || !hourMatch || !sched.ShouldFire("weekly-report", now) {
+					return nil
 				}
+				logger.Info("posting scheduled weekly report", "chat_id", cfg.ReportChatID, "thread_id", cfg.ReportThreadID)
+				if err := handler.SendScheduledReport(ctx, cfg.ReportChatID, cfg.ReportThreadID); err != nil {
+					return err // unmarked → retried by the next tick in this hour
+				}
+				sched.MarkFired("weekly-report", now)
 				return nil
 			},
 		})
@@ -173,41 +177,23 @@ func main() {
 	// Challenge scheduler jobs
 	sched.Add(scheduler.Job{
 		Name:     "challenge-finalize",
-		Interval: 1 * time.Hour,
+		Interval: 10 * time.Minute,
 		Run: func(ctx context.Context) error {
 			now := time.Now().In(timeutil.WIB)
 			// Finalize on Sunday at report hour
-			if now.Weekday() == time.Sunday && now.Hour() == cfg.ReportHour && sched.MarkAndCheck("challenge-finalize", now) {
-				yearWeek := domain.YearWeekString(now)
-				results, err := challengeSvc.FinalizeChallenge(ctx, yearWeek)
-				if err != nil {
-					return err
-				}
-				if len(results) > 0 && cfg.ReportChatID != 0 {
-					challenge, _ := challengeSvc.GetOrCreateChallenge(ctx, now)
-					if challenge != nil {
-						text := telegram.FormatChallengeResults(challenge, results)
-						_, _ = sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID)
-					}
-				}
+			if now.Weekday() != time.Sunday || now.Hour() != cfg.ReportHour || !sched.ShouldFire("challenge-finalize", now) {
+				return nil
 			}
-			return nil
-		},
-	})
-
-	sched.Add(scheduler.Job{
-		Name:     "challenge-announce",
-		Interval: 1 * time.Hour,
-		Run: func(ctx context.Context) error {
-			now := time.Now().In(timeutil.WIB)
-			// Announce on Monday at configured report hour (WIB)
-			if now.Weekday() == time.Monday && now.Hour() == cfg.ReportHour && sched.MarkAndCheck("challenge-announce", now) {
-				challenge, err := challengeSvc.GetOrCreateChallenge(ctx, now)
-				if err != nil {
-					return err
-				}
-				if cfg.ReportChatID != 0 {
-					text := fmt.Sprintf("⚔️ <b>New Weekly Challenge!</b>\n\n<b>%s</b>\n%s\n\nGunakan /challenge untuk melihat standings.", challenge.Title, challenge.Description)
+			yearWeek := domain.YearWeekString(now)
+			results, err := challengeSvc.FinalizeChallenge(ctx, yearWeek)
+			if err != nil {
+				return err // unmarked → retried; FinalizeChallenge is idempotent via its Finalized flag
+			}
+			sched.MarkFired("challenge-finalize", now)
+			if len(results) > 0 && cfg.ReportChatID != 0 {
+				challenge, _ := challengeSvc.GetOrCreateChallenge(ctx, now)
+				if challenge != nil {
+					text := telegram.FormatChallengeResults(challenge, results)
 					_, _ = sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID)
 				}
 			}
@@ -216,49 +202,85 @@ func main() {
 	})
 
 	sched.Add(scheduler.Job{
-		Name:     "daily-reminder",
-		Interval: 1 * time.Hour,
+		Name:     "challenge-announce",
+		Interval: 10 * time.Minute,
 		Run: func(ctx context.Context) error {
 			now := time.Now().In(timeutil.WIB)
-			if !sched.MarkAndCheck("daily-reminder", now) {
+			// Announce on Monday at configured report hour (WIB)
+			if now.Weekday() != time.Monday || now.Hour() != cfg.ReportHour || !sched.ShouldFire("challenge-announce", now) {
+				return nil
+			}
+			challenge, err := challengeSvc.GetOrCreateChallenge(ctx, now)
+			if err != nil {
+				return err // unmarked → retried
+			}
+			if cfg.ReportChatID != 0 {
+				text := fmt.Sprintf("⚔️ <b>New Weekly Challenge!</b>\n\n<b>%s</b>\n%s\n\nGunakan /challenge untuk melihat standings.", challenge.Title, challenge.Description)
+				if _, err := sender.SendHTML(ctx, cfg.ReportChatID, text, cfg.ReportThreadID); err != nil {
+					return err // unmarked → retried while the window lasts
+				}
+			}
+			sched.MarkFired("challenge-announce", now)
+			return nil
+		},
+	})
+
+	sched.Add(scheduler.Job{
+		Name:     "daily-reminder",
+		Interval: 10 * time.Minute,
+		Run: func(ctx context.Context) error {
+			now := time.Now().In(timeutil.WIB)
+			if !sched.ShouldFire("daily-reminder", now) {
 				return nil
 			}
 			dueReminders, err := reminderSvc.GetDueReminders(ctx)
 			if err != nil {
-				return err
+				return err // unmarked → retried within the user's reminder hour
 			}
+			sent, failed := 0, 0
 			for _, pref := range dueReminders {
+				var text string
 				if pref.IsCommunity || pref.ChatID < 0 {
-					text := telegram.FormatCommunityReminder()
-					_, _ = sender.SendHTML(ctx, pref.ChatID, text, pref.ThreadID)
+					text = telegram.FormatCommunityReminder()
+				} else {
+					streak, _ := gamSvc.GetStreak(ctx, pref.TelegramID)
+					streakDays := 0
+					if streak != nil {
+						streakDays = streak.CurrentStreak
+					}
+					text = telegram.FormatDailyReminder(streakDays)
+				}
+				if _, err := sender.SendHTML(ctx, pref.ChatID, text, pref.ThreadID); err != nil {
+					failed++
 					continue
 				}
-				streak, _ := gamSvc.GetStreak(ctx, pref.TelegramID)
-				streakDays := 0
-				if streak != nil {
-					streakDays = streak.CurrentStreak
-				}
-				text := telegram.FormatDailyReminder(streakDays)
-				_, _ = sender.SendHTML(ctx, pref.ChatID, text, pref.ThreadID)
+				sent++
 			}
+			if sent == 0 && failed > 0 {
+				// Every send failed — likely a Telegram-wide blip. Leave the
+				// hour unmarked so the next tick retries; partial success is
+				// kept to avoid duplicate reminders for delivered users.
+				return fmt.Errorf("all %d reminder sends failed", failed)
+			}
+			sched.MarkFired("daily-reminder", now)
 			return nil
 		},
 	})
 
 	sched.Add(scheduler.Job{
 		Name:     "monthly-report-card",
-		Interval: 1 * time.Hour,
+		Interval: 10 * time.Minute,
 		Run: func(ctx context.Context) error {
 			if reportCardSvc == nil {
 				return nil
 			}
 			now := time.Now().In(timeutil.WIB)
 			// Generate on 1st of month at report hour
-			if now.Day() == 1 && now.Hour() == cfg.ReportHour && sched.MarkAndCheck("monthly-report-card", now) {
-				lastMonth := now.AddDate(0, -1, 0).Format("2006-01")
+			if now.Day() == 1 && now.Hour() == cfg.ReportHour && sched.ShouldFire("monthly-report-card", now) {
+				lastMonth := timeutil.PreviousYearMonth(now)
 				members, err := memberRepo.ListMembers(ctx)
 				if err != nil {
-					return err
+					return err // unmarked → retried within the hour
 				}
 				for _, m := range members {
 					report, err := reportCardSvc.GenerateMonthlyReport(ctx, m.TelegramID, lastMonth)
@@ -274,6 +296,7 @@ func main() {
 						}
 					}
 				}
+				sched.MarkFired("monthly-report-card", now)
 			}
 			return nil
 		},
@@ -285,13 +308,14 @@ func main() {
 		Interval: 1 * time.Hour,
 		Run: func(_ context.Context) error {
 			now := time.Now().In(timeutil.WIB)
-			if now.Hour() == 3 && sched.MarkAndCheck("badger-daily-backup", now) {
+			if now.Hour() == 3 && sched.ShouldFire("badger-daily-backup", now) {
 				backupDir := filepath.Join(cfg.BadgerDBPath, "backups")
 				path, err := store.BackupToDir(backupDir, 7)
 				if err != nil {
 					logger.Error("badger daily backup failed", "error", err)
-					return err
+					return err // unmarked → retried on the next tick/restart
 				}
+				sched.MarkFired("badger-daily-backup", now)
 				logger.Info("badger daily backup completed", "path", path)
 			}
 			return nil
@@ -307,13 +331,14 @@ func main() {
 		Interval: 1 * time.Hour,
 		Run: func(ctx context.Context) error {
 			now := time.Now().In(timeutil.WIB)
-			if now.Hour() == 4 && sched.MarkAndCheck("gam-prune", now) {
+			if now.Hour() == 4 && sched.ShouldFire("gam-prune", now) {
 				cutoff := now.AddDate(0, 0, -90)
 				deleted, err := gamRepo.PruneGamification(ctx, cutoff)
 				if err != nil {
 					logger.Error("gamification prune failed", "error", err)
-					return err
+					return err // unmarked → retried on the next tick/restart
 				}
+				sched.MarkFired("gam-prune", now)
 				if deleted > 0 {
 					logger.Info("gamification prune completed", "deleted", deleted, "cutoff", cutoff.Format("2006-01-02"))
 				}

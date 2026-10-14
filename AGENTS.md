@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**ARK Vault** (`github.com/arkcode369/ark-vault`) is a community-focused Telegram bot written in Go (minimum 1.25, toolchain 1.26) that automates trade journal recording into per-member Notion pages/databases, paired with a local BadgerDB gamification engine (XP, 10 levels, daily streaks, 13 badges, rotating weekly challenges, monthly goals, dual-mode reminders) and optional Google Gemini AI trade coaching (`/analyze`, `/reportcard`).
+**ARK Vault** (`github.com/arkcode369/ark-vault`) is a community-focused Telegram bot written in Go (minimum 1.26, toolchain 1.26.9) that automates trade journal recording into per-member Notion pages/databases, paired with a local BadgerDB gamification engine (XP, 10 levels, daily streaks, 13 badges, rotating weekly challenges, monthly goals, dual-mode reminders) and optional Google Gemini AI trade coaching (`/analyze`, `/reportcard`).
 
 ## Architecture & Data Flow
 
@@ -27,7 +27,7 @@ The codebase follows **Hexagonal Architecture (Ports & Adapters)** with idiomati
 - `internal/adapter/badger/` â€” BadgerDB v4 wrapper with 5-minute value-log GC (`store.go`) and 9 repositories using the `gam:` key namespace (`gamification.go`, `badge.go`, `challenge.go`, `goal.go`, `reminder.go`, `analytics.go`, `cache.go`).
 - `internal/adapter/exporter/` â€” Zero-dependency CSV exporter with formula-injection sanitization (`csv.go`) and minimal raw PDF generator (`pdf.go`).
 - `internal/adapter/gemini/` â€” Google Gemini `generateContent` REST client (`analyzer.go`).
-- `internal/scheduler/` â€” Hourly ticker with `MarkAndCheck(jobName, now)` clock-hour deduplication (`scheduler.go`).
+- `internal/scheduler/` â€” Hourly ticker with `ShouldFire(jobName, now)`/`MarkFired(jobName, now)` clock-hour deduplication, claimed only after a job body succeeds (`scheduler.go`).
 - `pkg/` â€” Shared stateless utilities (`pkg/timeutil/tz.go`).
 
 ## Development Commands
@@ -78,7 +78,7 @@ docker compose up -d --build
 
 ## Runtime & Tooling Preferences
 
-- **Runtime**: Go minimum `1.25` (`go 1.25.0` in `go.mod`, required by `x/net`); build toolchain `golang:1.26-alpine` in `Dockerfile` and CI `GO_VERSION=1.26` — Go 1.23/1.24 are EOL and no longer receive security patches, which fails the govulncheck CI gate.
+- **Runtime**: Go minimum `1.26` (`go 1.26.0` + `toolchain go1.26.9` in `go.mod`, required by `x/net v0.60+` for patched stdlib transitive versions); build toolchain `golang:1.26-alpine` in `Dockerfile` and CI `GO_VERSION=1.26.9` — Go 1.23/1.24/1.25 are EOL and no longer receive security patches, which fails the govulncheck CI gate.
 - **Stdlib-First Policy**: Keep `github.com/dgraph-io/badger/v4` as the sole direct dependency in `go.mod`. Use standard `net/http`, `encoding/json`, `mime/multipart`, and `log/slog` rather than adding third-party HTTP/bot/ORM frameworks.
 - **Container Constraints**: Production runs as non-root `appuser` on `alpine:3.20` with `/data/badger` mounted to a persistent volume and a `128M` memory limit (`docker-compose.yml`).
 

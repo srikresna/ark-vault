@@ -13,36 +13,58 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestMarkAndCheck(t *testing.T) {
+// TestShouldFireMarkFired pins the claim-on-success API: ShouldFire only
+// checks the dedup key; MarkFired records the fire. A job body that fails must
+// NOT be marked, so the next tick in the same clock hour retries it.
+func TestShouldFireMarkFired(t *testing.T) {
 	s := NewScheduler(testLogger())
 
 	t1 := time.Date(2026, 10, 11, 10, 15, 0, 0, time.UTC)
 	t1SameHour := time.Date(2026, 10, 11, 10, 45, 0, 0, time.UTC)
 	t2DiffHour := time.Date(2026, 10, 11, 11, 0, 0, 0, time.UTC)
 
-	// First call for jobA in hour 10 should return true
-	if !s.MarkAndCheck("jobA", t1) {
+	if !s.ShouldFire("jobA", t1) {
 		t.Errorf("expected true on first call for jobA at %v", t1)
 	}
-
-	// Second call for jobA in same hour 10 should return false
-	if s.MarkAndCheck("jobA", t1SameHour) {
-		t.Errorf("expected false on second call for jobA at %v", t1SameHour)
+	// Not marked yet: still fireable within the same hour.
+	if !s.ShouldFire("jobA", t1SameHour) {
+		t.Errorf("ShouldFire must stay true until MarkFired (checked at %v)", t1SameHour)
 	}
-
-	// First call for different job (jobB) in hour 10 should return true
-	if !s.MarkAndCheck("jobB", t1) {
+	s.MarkFired("jobA", t1)
+	if s.ShouldFire("jobA", t1SameHour) {
+		t.Errorf("expected false after MarkFired in same hour (%v)", t1SameHour)
+	}
+	if !s.ShouldFire("jobA", t2DiffHour) {
+		t.Errorf("expected true for jobA in new hour %v", t2DiffHour)
+	}
+	s.MarkFired("jobA", t2DiffHour)
+	if s.ShouldFire("jobA", t2DiffHour) {
+		t.Errorf("expected false after MarkFired in same hour %v", t2DiffHour)
+	}
+	// Different job is independent.
+	if !s.ShouldFire("jobB", t1) {
 		t.Errorf("expected true on first call for jobB at %v", t1)
 	}
+}
 
-	// First call for jobA in different hour (11) should return true
-	if !s.MarkAndCheck("jobA", t2DiffHour) {
-		t.Errorf("expected true on first call for jobA in new hour %v", t2DiffHour)
+// TestShouldFire_RetryAfterFailedJob pins the transient-failure fix: when a
+// weekly/monthly job body fails before MarkFired, the same clock hour must
+// still be fireable so the next tick retries instead of skipping the event
+// permanently.
+func TestShouldFire_RetryAfterFailedJob(t *testing.T) {
+	s := NewScheduler(testLogger())
+
+	now := time.Date(2026, 10, 11, 20, 5, 0, 0, time.UTC)
+	if !s.ShouldFire("weekly-report", now) {
+		t.Fatal("first ShouldFire should be true")
 	}
-
-	// Second call for jobA in hour 11 should return false
-	if s.MarkAndCheck("jobA", t2DiffHour) {
-		t.Errorf("expected false on second call for jobA in same hour %v", t2DiffHour)
+	// Simulate a failed job body: it never calls MarkFired.
+	if !s.ShouldFire("weekly-report", now) {
+		t.Fatal("a failed (unmarked) job must remain fireable within the same hour")
+	}
+	s.MarkFired("weekly-report", now)
+	if s.ShouldFire("weekly-report", now) {
+		t.Fatal("after a successful MarkFired, dedup must block the same hour")
 	}
 }
 

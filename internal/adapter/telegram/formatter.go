@@ -212,7 +212,7 @@ func FormatTradeConfirmation(t *domain.Trade) string {
 	}
 	sb.WriteString("\n")
 	if t.TimeWindow != "" {
-		fmt.Fprintf(&sb, "Session: <b>%s</b>\n", t.TimeWindow)
+		fmt.Fprintf(&sb, "Session: <b>%s</b>\n", escapeHTML(string(t.TimeWindow)))
 	}
 	if t.Confluence != "" {
 		fmt.Fprintf(&sb, "Confluence: %s\n", escapeHTML(t.Confluence))
@@ -660,7 +660,7 @@ func FormatOpenTrades(trades []domain.Trade) (string, [][]InlineButton) {
 		t := trades[i]
 		fmt.Fprintf(&sb, "<b>#%d</b> %s <b>%s</b> (%s)", i+1, t.Date.Format("02 Jan"), escapeHTML(t.Symbol), t.Direction)
 		if t.TimeWindow != "" {
-			fmt.Fprintf(&sb, " • %s", t.TimeWindow)
+			fmt.Fprintf(&sb, " • %s", escapeHTML(string(t.TimeWindow)))
 		}
 		sb.WriteString("\n")
 		if t.ID != "" {
@@ -743,7 +743,7 @@ func FormatEditTradeMenu(t *domain.Trade) (string, [][]InlineButton) {
 	fmt.Fprintf(&sb, "Symbol: <b>%s</b> (%s)\n", escapeHTML(t.Symbol), t.AssetType.String())
 	fmt.Fprintf(&sb, "Direction: <b>%s</b>\n", t.Direction)
 	fmt.Fprintf(&sb, "Status: <b>%s</b> (%+.1fR)\n", t.Status, t.ResultRR)
-	fmt.Fprintf(&sb, "Session: <b>%s</b>\n", t.TimeWindow)
+	fmt.Fprintf(&sb, "Session: <b>%s</b>\n", escapeHTML(string(t.TimeWindow)))
 	fmt.Fprintf(&sb, "Confluence: %s\n\n", escapeHTML(t.Confluence))
 	sb.WriteString("Pilih bagian yang ingin diubah:")
 

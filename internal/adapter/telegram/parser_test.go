@@ -225,3 +225,78 @@ RR: LOSS 1RR`
 		t.Errorf("rr: got %f, want -1", result.Trade.ResultRR)
 	}
 }
+
+// TestParseJournalMessage_RejectsMalformedRR pins the fix for silent RR drops:
+// a Result/RR line whose value matches neither the numeric nor the status
+// grammar must produce a user-facing error instead of fabricating an OPEN, 0R
+// trade (which corrupted stats, challenges and XP).
+func TestParseJournalMessage_RejectsMalformedRR(t *testing.T) {
+	for _, val := range []string{"2R", "+2R", "2 rr", "2R WIN", "x"} {
+		result := ParseJournalMessage("#journal\nPair: XAUUSD\nType: BUY\nRR: " + val)
+		if result.Err == "" {
+			t.Errorf("RR %q: expected a parse error, got none", val)
+		}
+		if result.Trade != nil {
+			t.Errorf("RR %q: no trade should be returned alongside the error", val)
+		}
+	}
+}
+
+// TestParseJournalMessage_AcceptsCanonicalRR guards against over-blocking:
+// every format documented to users must keep parsing after the malformed-RR
+// rejection was added.
+func TestParseJournalMessage_AcceptsCanonicalRR(t *testing.T) {
+	tests := []struct {
+		val    string
+		status domain.TradeStatus
+		rr     float64
+	}{
+		{"+2", domain.StatusWin, 2},
+		{"-1.5", domain.StatusLoss, -1.5},
+		{"0", domain.StatusBE, 0},
+		{"WIN 2RR", domain.StatusWin, 2},
+		{"WIN", domain.StatusWin, 0},
+		{"LOSS 1", domain.StatusLoss, -1},
+		{"BE", domain.StatusBE, 0},
+	}
+	for _, tt := range tests {
+		result := ParseJournalMessage("#journal\nPair: XAUUSD\nType: BUY\nRR: " + tt.val)
+		if result.Err != "" {
+			t.Errorf("RR %q: unexpected error: %s", tt.val, result.Err)
+			continue
+		}
+		if result.Trade.Status != tt.status {
+			t.Errorf("RR %q: status = %s, want %s", tt.val, result.Trade.Status, tt.status)
+		}
+		if result.Trade.ResultRR != tt.rr {
+			t.Errorf("RR %q: ResultRR = %v, want %v", tt.val, result.Trade.ResultRR, tt.rr)
+		}
+	}
+}
+
+// TestParseJournalMessage_InvalidRRErrorIsHTMLEscaped pins that the
+// malformed-RR feedback survives HTML sending: ParseResult.Err is rendered via
+// SendHTML, so the echoed raw RR value must be entity-escaped or markup- and
+// ampersand-bearing input breaks entity parsing and the user gets no feedback.
+func TestParseJournalMessage_InvalidRRErrorIsHTMLEscaped(t *testing.T) {
+	result := ParseJournalMessage("#journal\nPair: XAUUSD\nType: BUY\nRR: <b>&2R</b>")
+	if result.Err == "" {
+		t.Fatal("expected a parse error")
+	}
+	if strings.Contains(result.Err, "<b>") {
+		t.Errorf("raw markup echoed into HTML-bound message: %s", result.Err)
+	}
+	if !strings.Contains(result.Err, "&lt;b&gt;") {
+		t.Errorf("expected entity-escaped RR echo: %s", result.Err)
+	}
+}
+
+// TestParseSession_TruncatesUnknownFreeText bounds free-text session values:
+// Notion select options cap at 100 characters, and unbounded raw text is an
+// injection vector into CSV/HTML sinks downstream.
+func TestParseSession_TruncatesUnknownFreeText(t *testing.T) {
+	got := parseSession(strings.Repeat("=AB", 100)) // 300 runes, formula-shaped
+	if got := len([]rune(got)); got > 100 {
+		t.Errorf("parseSession kept %d runes; Notion select caps at 100", got)
+	}
+}

@@ -60,7 +60,7 @@ func (s *Sender) call(ctx context.Context, method string, payload interface{}) (
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactTokenErr(err, s.token)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
@@ -230,7 +230,7 @@ func (s *Sender) SendDocument(ctx context.Context, chatID int64, filename string
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return err
+		return redactTokenErr(err, s.token)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

@@ -30,3 +30,16 @@ func StartOfWeek(now time.Time) time.Time {
 	monday := t.AddDate(0, 0, -(weekday - 1))
 	return time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, WIB)
 }
+
+// PreviousYearMonth returns the "2006-01" key of the calendar month before
+// that of t (evaluated in WIB).
+//
+// Subtracting a month with AddDate(0, -1, 0) directly on t normalizes day
+// overflow — on 31 March it yields 3 March, i.e. the CURRENT month. Anchoring
+// on the 1st before subtracting keeps the result on the previous month for
+// every day of the month.
+func PreviousYearMonth(t time.Time) string {
+	t = t.In(WIB)
+	first := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, WIB)
+	return first.AddDate(0, -1, 0).Format("2006-01")
+}

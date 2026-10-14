@@ -26,6 +26,13 @@ type MemberRepo struct {
 	// In-memory cache: telegramID → Member (to avoid repeated API calls).
 	mu    sync.RWMutex
 	cache map[int64]*domain.Member
+
+	// inflight serializes EnsureMember per Telegram ID. The bot dispatches
+	// every update in its own goroutine, so a member's first two messages can
+	// race: without this lock both callers miss the caches and both create a
+	// Notion member page + inline trades database, orphaning one of them.
+	inflightMu    sync.Mutex
+	inflightLocks map[int64]*sync.Mutex
 }
 
 // NewMemberRepo creates a MemberRepo.
@@ -35,39 +42,76 @@ func NewMemberRepo(client *Client, parentID string, stores ...MemberCacheStore) 
 		s = stores[0]
 	}
 	return &MemberRepo{
-		client:   client,
-		parentID: parentID,
-		store:    s,
-		cache:    make(map[int64]*domain.Member),
+		client:        client,
+		parentID:      parentID,
+		store:         s,
+		cache:         make(map[int64]*domain.Member),
+		inflightLocks: make(map[int64]*sync.Mutex),
 	}
 }
 
-// EnsureMember creates the member page + inline trade database if it doesn't exist.
-func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domain.Member, error) {
+// lookupCached resolves the member from the in-memory map or the persistent
+// store, resolving a missing inline DB ID along the way. Returns nil on a
+// cache miss.
+func (r *MemberRepo) lookupCached(ctx context.Context, telegramID int64) *domain.Member {
 	// Check in-memory cache first
 	r.mu.RLock()
-	if cached, ok := r.cache[m.TelegramID]; ok && cached.NotionDBID != "" {
+	if cached, ok := r.cache[telegramID]; ok && cached.NotionDBID != "" {
 		cp := *cached
 		r.mu.RUnlock()
-		return &cp, nil
+		return &cp
 	}
 	r.mu.RUnlock()
 
 	// Check persistent cache store
-	if r.store != nil {
-		if persisted, err := r.store.GetCachedMember(ctx, m.TelegramID); err == nil && persisted != nil {
-			if persisted.NotionDBID == "" && persisted.NotionPageID != "" {
-				persisted.NotionDBID = r.resolveTradeDBID(ctx, persisted.NotionPageID)
-				_ = r.store.SaveCachedMember(ctx, persisted)
-			}
-			if persisted.NotionDBID != "" {
-				cp := *persisted
-				r.mu.Lock()
-				r.cache[m.TelegramID] = &cp
-				r.mu.Unlock()
-				return persisted, nil
-			}
-		}
+	if r.store == nil {
+		return nil
+	}
+	persisted, err := r.store.GetCachedMember(ctx, telegramID)
+	if err != nil || persisted == nil {
+		return nil
+	}
+	if persisted.NotionDBID == "" && persisted.NotionPageID != "" {
+		persisted.NotionDBID = r.resolveTradeDBID(ctx, persisted.NotionPageID)
+		_ = r.store.SaveCachedMember(ctx, persisted)
+	}
+	if persisted.NotionDBID == "" {
+		return nil
+	}
+	cp := *persisted
+	r.mu.Lock()
+	r.cache[telegramID] = &cp
+	r.mu.Unlock()
+	return persisted
+}
+
+// memberLock returns the per-Telegram-ID mutex serializing EnsureMember.
+func (r *MemberRepo) memberLock(telegramID int64) *sync.Mutex {
+	r.inflightMu.Lock()
+	defer r.inflightMu.Unlock()
+	l, ok := r.inflightLocks[telegramID]
+	if !ok {
+		l = &sync.Mutex{}
+		r.inflightLocks[telegramID] = l
+	}
+	return l
+}
+
+// EnsureMember creates the member page + inline trade database if it doesn't exist.
+func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domain.Member, error) {
+	if found := r.lookupCached(ctx, m.TelegramID); found != nil {
+		return found, nil
+	}
+
+	// Single-flight per Telegram ID: once serialized, re-check the caches so
+	// the loser of a race reuses the winner's page instead of creating a
+	// duplicate member page + trades database.
+	lock := r.memberLock(m.TelegramID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if found := r.lookupCached(ctx, m.TelegramID); found != nil {
+		return found, nil
 	}
 
 	// Search Notion for existing page with matching Telegram ID

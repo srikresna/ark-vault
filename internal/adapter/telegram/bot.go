@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,11 +11,28 @@ import (
 	"net/url"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 const telegramAPI = "https://api.telegram.org/bot"
+
+// redactTokenErr rewrites transport errors so the bot token never reaches
+// logs. Every Bot API call embeds the token in the URL path, and
+// http.Client.Do returns *url.Error whose Error() renders the full request
+// URL — a DNS failure, timeout or refused connection would otherwise log the
+// raw token verbatim.
+func redactTokenErr(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.URL != "" {
+		ue.URL = strings.ReplaceAll(ue.URL, token, "REDACTED")
+	}
+	return err
+}
 
 const (
 	// maxConcurrentUpdates bounds the number of updates processed concurrently so
@@ -174,7 +192,7 @@ func (b *Bot) getUpdates(ctx context.Context) ([]Update, error) {
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactTokenErr(err, b.token)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -206,7 +224,7 @@ func (b *Bot) CheckChatMember(ctx context.Context, chatID int64, userID int64) (
 	}
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return false, err
+		return false, redactTokenErr(err, b.token)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
@@ -246,7 +264,7 @@ func (b *Bot) GetFile(ctx context.Context, fileID string) ([]byte, error) {
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactTokenErr(err, b.token)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -277,7 +295,7 @@ func (b *Bot) GetFile(ctx context.Context, fileID string) ([]byte, error) {
 
 	resp, err = b.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactTokenErr(err, b.token)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

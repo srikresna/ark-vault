@@ -5,7 +5,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
@@ -251,4 +255,65 @@ func (errMemberCacheStore) SaveCachedMember(context.Context, *domain.Member) err
 
 func (errMemberCacheStore) ListCachedMembers(context.Context) ([]domain.Member, error) {
 	return nil, errors.New("badger unavailable")
+}
+
+// TestMemberRepo_EnsureMember_ConcurrentSingleFlight pins the TOCTOU fix: the
+// bot dispatches each update in its own goroutine, so a member's first two
+// messages can race EnsureMember. Without single-flight both callers miss the
+// caches, both search Notion, and both create a member page + inline trades
+// database — trades then land in an orphaned database and vanish from
+// /history, /stats and exports.
+func TestMemberRepo_EnsureMember_ConcurrentSingleFlight(t *testing.T) {
+	var pageCreates atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pages"):
+			if pageCreates.Add(1) == 1 {
+				// Hold the first create open so a racy second caller is
+				// guaranteed to also reach its own create attempt.
+				time.Sleep(300 * time.Millisecond)
+			}
+			_, _ = w.Write([]byte(`{"id":"page-1"}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/databases"):
+			_, _ = w.Write([]byte(`{"id":"db-1"}`))
+		default:
+			_, _ = w.Write([]byte(`{"results":[],"has_more":false}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClient("ntn_test")
+	client.baseURL = srv.URL + "/v1"
+	repo := NewMemberRepo(client, "parent-1", newMockMemberCacheStore())
+
+	m := &domain.Member{TelegramID: 555, Username: "racer"}
+	var (
+		wg         sync.WaitGroup
+		start      = make(chan struct{})
+		res1, res2 *domain.Member
+		err1, err2 error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		res1, err1 = repo.EnsureMember(context.Background(), m)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		res2, err2 = repo.EnsureMember(context.Background(), m)
+	}()
+	close(start)
+	wg.Wait()
+
+	if err1 != nil || err2 != nil {
+		t.Fatalf("EnsureMember failed: %v / %v", err1, err2)
+	}
+	if got := pageCreates.Load(); got != 1 {
+		t.Errorf("EnsureMember created %d member pages for one Telegram ID; want 1", got)
+	}
+	if res1.NotionPageID != res2.NotionPageID || res1.NotionDBID != res2.NotionDBID {
+		t.Errorf("concurrent EnsureMember returned divergent members: %+v vs %+v", res1, res2)
+	}
 }

@@ -58,7 +58,7 @@ func (e *CSVExporter) ExportCSV(_ context.Context, trades []domain.Trade) ([]byt
 			string(t.Direction),
 			string(t.Status),
 			fmt.Sprintf("%.2f", t.ResultRR),
-			string(t.TimeWindow),
+			sanitizeCSVField(string(t.TimeWindow)),
 			sanitizeCSVField(t.Confluence),
 			sanitizeCSVField(t.Notes),
 		}

@@ -17,8 +17,10 @@ type Job struct {
 }
 
 // Scheduler runs jobs at fixed intervals.
-// It deduplicates hourly jobs so they fire at most once per clock-hour,
-// preventing re-execution on bot restarts within the same hour.
+// Dedup is per-process and in-memory: within a running process each job fires
+// at most once per clock-hour, but a restart within an already-fired hour may
+// re-fire that hour's job — job bodies must tolerate that (e.g. idempotency
+// flags), never assume cross-restart exactly-once delivery.
 type Scheduler struct {
 	jobs      []Job
 	logger    *slog.Logger
@@ -59,17 +61,24 @@ func hourKey(t time.Time) string {
 	return fmt.Sprintf("%d-%02d-%02dT%02d", t.Year(), t.Month(), t.Day(), t.Hour())
 }
 
-// MarkAndCheck atomically checks if a job has already fired this hour.
-// Returns true if the job should run (first call this hour), false if duplicate.
-func (s *Scheduler) MarkAndCheck(jobName string, t time.Time) bool {
+// ShouldFire reports whether the job's dedup key allows a fire at time t,
+// WITHOUT marking it. Pair with MarkFired after the job body succeeds so a
+// transient failure (Notion 5xx, Telegram timeout) is retried by the next
+// tick instead of permanently consuming the occurrence. Each job runs
+// sequentially in its own goroutine, so check→work→mark cannot double-fire
+// within a process.
+func (s *Scheduler) ShouldFire(jobName string, t time.Time) bool {
 	key := hourKey(t)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.lastFired[jobName] == key {
-		return false
-	}
-	s.lastFired[jobName] = key
-	return true
+	return s.lastFired[jobName] != key
+}
+
+// MarkFired records the job as fired for the clock-hour of t.
+func (s *Scheduler) MarkFired(jobName string, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastFired[jobName] = hourKey(t)
 }
 
 func (s *Scheduler) runJob(ctx context.Context, job Job) {
@@ -79,8 +88,9 @@ func (s *Scheduler) runJob(ctx context.Context, job Job) {
 	// process-start anniversary of each hour, so without this a job whose
 	// trigger hour is between start and the first tick would be missed for a
 	// full hour (e.g. the 20:00 reminder when the bot starts at 20:30).
-	// MarkAndCheck still deduplicates within the clock-hour; the only cost is
-	// that a restart within an already-fired hour may re-fire that hour's job.
+	// ShouldFire/MarkFired still deduplicate within the clock-hour; the only
+	// cost is that a restart within an already-fired hour may re-fire that
+	// hour's job.
 	if ctx.Err() == nil {
 		s.logger.Info("scheduler: running job", "name", job.Name, "reason", "startup")
 		s.executeJobSafely(ctx, job)
