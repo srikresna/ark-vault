@@ -160,11 +160,12 @@ func FormatRCurve(curve []float64) string {
 
 // FormatLeaderboard formats the leaderboard as an HTML Telegram message.
 func FormatLeaderboard(entries []service.LeaderboardEntry, metric string) string {
-	return FormatLeaderboardWithPeriod(entries, metric, "all")
+	return FormatLeaderboardWithPeriod(entries, metric, "all", "")
 }
 
 // FormatLeaderboardWithPeriod formats the leaderboard for a given period ("all", "week", "month").
-func FormatLeaderboardWithPeriod(entries []service.LeaderboardEntry, metric, period string) string {
+// note (optional) explains a relaxed qualification, e.g. the young-community fallback.
+func FormatLeaderboardWithPeriod(entries []service.LeaderboardEntry, metric, period, note string) string {
 	var sb strings.Builder
 	sb.WriteString("🏆 <b>Leaderboard</b>")
 	if metric == "rr" {
@@ -173,6 +174,10 @@ func FormatLeaderboardWithPeriod(entries []service.LeaderboardEntry, metric, per
 		sb.WriteString(" (by Win Rate")
 	}
 	fmt.Fprintf(&sb, " — %s)\n\n", periodLabel(period))
+
+	if note != "" {
+		fmt.Fprintf(&sb, "ℹ️ %s\n\n", note)
+	}
 
 	medals := []string{"🥇", "🥈", "🥉"}
 	for i, e := range entries {

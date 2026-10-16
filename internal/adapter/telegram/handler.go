@@ -522,7 +522,18 @@ func (h *Handler) cmdLeaderboard(ctx context.Context, msg *Message, text string)
 		return
 	}
 
-	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatLeaderboardWithPeriod(entries, metric, period), msg.MessageThreadID)
+	// Young-community fallback: when nobody reaches the all-time threshold,
+	// list everyone with at least one closed trade and say so, instead of an
+	// empty leaderboard.
+	note := ""
+	if len(entries) == 0 && minTrades > 1 {
+		if relaxed, err := h.svc.Leaderboard.GetLeaderboardByPeriod(ctx, metric, period, 10, 1); err == nil && len(relaxed) > 0 {
+			entries = relaxed
+			note = fmt.Sprintf("Belum ada yang mencapai %d trade selesai — menampilkan semua member.", minTrades)
+		}
+	}
+
+	_, _ = h.sender.SendHTML(ctx, msg.Chat.ID, FormatLeaderboardWithPeriod(entries, metric, period, note), msg.MessageThreadID)
 }
 
 // cmdExport exports the member's trades as CSV or PDF with optional period filtering.

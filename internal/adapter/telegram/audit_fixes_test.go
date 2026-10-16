@@ -3,6 +3,7 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -73,6 +74,86 @@ func TestFormatOpenTrades_EscapesTimeWindow(t *testing.T) {
 	if !strings.Contains(text, "&lt;b&gt;pwn&lt;/b&gt;") || !strings.Contains(text, "&lt;a href=") {
 		t.Errorf("expected fully escaped TimeWindow in output: %s", text)
 	}
+}
+
+// TestCmdLeaderboard_YoungCommunityFallback pins the young-community fix:
+// when nobody reaches the all-time minimum (5 closed trades) the leaderboard
+// falls back to every member with >=1 closed trade and says so, instead of
+// showing an empty "Belum ada member yang memenuhi syarat."
+func TestCmdLeaderboard_YoungCommunityFallback(t *testing.T) {
+	var mu sync.Mutex
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		_ = json.Unmarshal(body, &payload)
+		if text, ok := payload["text"].(string); ok {
+			mu.Lock()
+			sent = append(sent, text)
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":10}}`))
+	}))
+	defer srv.Close()
+
+	sender := NewSender("test-token")
+	sender.baseAPI = srv.URL + "/bot"
+	tradeRepo := newMockFeatureTradeRepo()
+	memberRepo := &mockLbMemberRepo{members: []domain.Member{{TelegramID: 42, Username: "budi"}}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewHandler(sender, Services{
+		Leaderboard: service.NewLeaderboardService(tradeRepo, memberRepo),
+	}, nil, tradeRepo, memberRepo, NewRateLimiter(100, time.Minute), logger, 0, 999)
+	defer h.Close()
+
+	userID := int64(42)
+	now := time.Now().UTC()
+	tradeRepo.trades[userID] = []domain.Trade{
+		{ID: "t1", Date: now.Add(-time.Hour), Symbol: "XAUUSD", Direction: domain.DirBuy, Status: domain.StatusWin, ResultRR: 2.0},
+		{ID: "t2", Date: now.Add(-2 * time.Hour), Symbol: "EURUSD", Direction: domain.DirSell, Status: domain.StatusLoss, ResultRR: -1.0},
+	}
+
+	h.cmdLeaderboard(context.Background(), &Message{
+		From: &User{ID: userID, Username: "budi"},
+		Chat: &Chat{ID: userID, Type: "private"},
+	}, "/leaderboard")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) == 0 {
+		t.Fatal("expected leaderboard message")
+	}
+	last := sent[len(sent)-1]
+	if !strings.Contains(last, "@budi") {
+		t.Errorf("fallback must list the member: %s", last)
+	}
+	if !strings.Contains(last, "Belum ada yang mencapai 5 trade selesai") {
+		t.Errorf("fallback note missing: %s", last)
+	}
+	if strings.Contains(last, "Belum ada member yang memenuhi syarat") {
+		t.Errorf("empty-state message must not appear alongside fallback entries: %s", last)
+	}
+}
+
+// mockLbMemberRepo serves a fixed roster for leaderboard tests.
+type mockLbMemberRepo struct {
+	members []domain.Member
+}
+
+func (m *mockLbMemberRepo) EnsureMember(_ context.Context, member *domain.Member) (*domain.Member, error) {
+	return member, nil
+}
+func (m *mockLbMemberRepo) GetMember(_ context.Context, telegramID int64) (*domain.Member, error) {
+	for i := range m.members {
+		if m.members[i].TelegramID == telegramID {
+			return &m.members[i], nil
+		}
+	}
+	return nil, nil
+}
+func (m *mockLbMemberRepo) ListMembers(context.Context) ([]domain.Member, error) {
+	return m.members, nil
 }
 
 // TestCmdJournal_ReplacesPendingEditSession pins flow exclusivity: starting
