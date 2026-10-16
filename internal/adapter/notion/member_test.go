@@ -15,6 +15,10 @@ import (
 )
 
 type mockMemberCacheStore struct {
+	// mu guards members: lookupCached probes this store on the fast path
+	// (outside the per-ID single-flight lock) while SaveCachedMember writes
+	// under it, so the mock must be as thread-safe as real BadgerDB.
+	mu      sync.RWMutex
 	members map[int64]domain.Member
 }
 
@@ -23,6 +27,8 @@ func newMockMemberCacheStore() *mockMemberCacheStore {
 }
 
 func (m *mockMemberCacheStore) GetCachedMember(_ context.Context, telegramID int64) (*domain.Member, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if mem, ok := m.members[telegramID]; ok {
 		cp := mem
 		return &cp, nil
@@ -31,11 +37,15 @@ func (m *mockMemberCacheStore) GetCachedMember(_ context.Context, telegramID int
 }
 
 func (m *mockMemberCacheStore) SaveCachedMember(_ context.Context, member *domain.Member) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.members[member.TelegramID] = *member
 	return nil
 }
 
 func (m *mockMemberCacheStore) ListCachedMembers(_ context.Context) ([]domain.Member, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	var out []domain.Member
 	for _, mem := range m.members {
 		out = append(out, mem)
