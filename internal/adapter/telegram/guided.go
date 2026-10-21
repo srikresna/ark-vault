@@ -107,6 +107,9 @@ func StepPrompt(s *GuidedSession) (string, [][]InlineBtn) {
 				{Text: "Indices", Data: "asset:INDICES"},
 				{Text: "Crypto", Data: "asset:CRYPTO"},
 			},
+			{
+				{Text: "Commodities", Data: "asset:COMMODITIES"},
+			},
 		}
 	case StepSymbol:
 		return fmt.Sprintf("📊 <b>Step 2/9</b> — Masukkan pair/symbol:\n(Asset: %s)", s.Trade.AssetType.String()), nil

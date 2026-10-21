@@ -99,12 +99,56 @@ func TestDetectAssetType(t *testing.T) {
 		{"GBPJPY", AssetForex},
 		{"GOLD", AssetGold},
 		{"unknown", AssetForex}, // fallback
+		// User's specific symbols from the report:
+		{"NQ", AssetIndices},
+		{"MNQ", AssetIndices},
+		{"NQ1!", AssetIndices},
+		{"YM", AssetIndices},
+		{"MYM", AssetIndices},
+		{"ES", AssetIndices},
+		{"MES", AssetIndices},
+		{"XAU", AssetGold},
+		{"USOIL", AssetCommodity},
+		{"UKOIL", AssetCommodity},
+		{"WTI", AssetCommodity},
+		{"BRENT", AssetCommodity},
+		{"EU", AssetForex},
+		{"GU", AssetForex},
+		{"SOLUSDT", AssetCrypto},
 	}
 
 	for _, tt := range tests {
 		got := DetectAssetType(tt.symbol)
 		if got != tt.want {
 			t.Errorf("DetectAssetType(%q) = %q, want %q", tt.symbol, got, tt.want)
+		}
+	}
+}
+
+func TestParseAssetType(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    AssetType
+		wantOk  bool
+	}{
+		{"forex", AssetForex, true},
+		{"FX", AssetForex, true},
+		{"Gold", AssetGold, true},
+		{"XAU", AssetGold, true},
+		{"indices", AssetIndices, true},
+		{"Index", AssetIndices, true},
+		{"crypto", AssetCrypto, true},
+		{"cryptocurrency", AssetCrypto, true},
+		{"commodity", AssetCommodity, true},
+		{"commodities", AssetCommodity, true},
+		{"oil", AssetCommodity, true},
+		{"invalid_val", "", false},
+	}
+
+	for _, tt := range tests {
+		got, ok := ParseAssetType(tt.input)
+		if ok != tt.wantOk || got != tt.want {
+			t.Errorf("ParseAssetType(%q) = (%q, %v), want (%q, %v)", tt.input, got, ok, tt.want, tt.wantOk)
 		}
 	}
 }

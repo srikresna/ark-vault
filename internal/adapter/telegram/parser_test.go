@@ -73,6 +73,22 @@ Confluence: FVG + OB mitigation on 15m`
 	}
 }
 
+func TestParseJournalMessage_WithAsset(t *testing.T) {
+	input := `#journal
+Pair: CUSTOM1
+Asset: Indices
+Type: BUY
+RR: +2`
+
+	result := ParseJournalMessage(input)
+	if result.Err != "" {
+		t.Fatalf("unexpected error: %s", result.Err)
+	}
+	if result.Trade.AssetType != domain.AssetIndices {
+		t.Errorf("AssetType: got %q, want %q", result.Trade.AssetType, domain.AssetIndices)
+	}
+}
+
 func TestParseJournalMessage_LossRR(t *testing.T) {
 	input := `#journal
 Pair: EURUSD

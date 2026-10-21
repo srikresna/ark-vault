@@ -386,6 +386,7 @@ func (r *MemberRepo) createTradeDatabase(ctx context.Context, parentPageID strin
 						{"name": "Gold", "color": "yellow"},
 						{"name": "Indices", "color": "green"},
 						{"name": "Crypto", "color": "purple"},
+						{"name": "Commodities", "color": "orange"},
 					},
 				},
 			},

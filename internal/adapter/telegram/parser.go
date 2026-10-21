@@ -10,7 +10,7 @@ import (
 
 var (
 	journalTag = regexp.MustCompile(`(?i)^#journal`)
-	fieldRe    = regexp.MustCompile(`(?i)^(pair|symbol|type|direction|rr|result|session|confluence|notes?)\s*[:=]\s*(.+)$`)
+	fieldRe    = regexp.MustCompile(`(?i)^(pair|symbol|asset|asset\s*type|type|direction|rr|result|session|confluence|notes?)\s*[:=]\s*(.+)$`)
 	rrValueRe  = regexp.MustCompile(`(?i)^([+-]?\d+\.?\d*)\s*$`)
 	rrStatusRe = regexp.MustCompile(`(?i)^(WIN|LOSS|BE)\s*(\d+\.?\d*)?\s*(rr|r)?$`)
 )
@@ -69,6 +69,11 @@ func ParseJournalMessage(text string) ParseResult {
 		case key == "pair" || key == "symbol":
 			t.Symbol = strings.ToUpper(strings.ReplaceAll(truncateUTF8(val, maxSymbolLen), "/", ""))
 			parsed["symbol"] = true
+		case key == "asset" || key == "asset type" || key == "assettype":
+			if at, ok := domain.ParseAssetType(val); ok {
+				t.AssetType = at
+				parsed["asset"] = true
+			}
 		case key == "type" || key == "direction":
 			dir := strings.ToUpper(val)
 			switch dir {
