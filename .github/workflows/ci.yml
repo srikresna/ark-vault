@@ -9,7 +9,7 @@ on:
 env:
   # Pin the exact patch: a floating '1.26' once resolved to 1.26.3 whose
   # stdlib still had open CVEs, failing the govulncheck gate.
-  GO_VERSION: '1.26.9'
+  GO_VERSION: '1.26.10'
   REGISTRY: ghcr.io
 
 jobs:

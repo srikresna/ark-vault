@@ -2,7 +2,7 @@ module github.com/arkcode369/ark-vault
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require github.com/dgraph-io/badger/v4 v4.9.1
 
