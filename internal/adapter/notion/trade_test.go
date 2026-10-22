@@ -223,6 +223,45 @@ func TestTradeRepo_ParseSingleTrade_CreatedTime(t *testing.T) {
 	}
 }
 
+// TestTradeRepo_ParseSingleTrade_NormalizesAssetType pins the regression where
+// the raw Notion select label ("Indices", "Gold", "Commodities") was cast
+// straight into domain.AssetType, leaving mixed-case values that failed
+// IsValid and split asset statistics into separate map keys.
+func TestTradeRepo_ParseSingleTrade_NormalizesAssetType(t *testing.T) {
+	repo := NewTradeRepo(NewClient("token"), nil)
+
+	cases := []struct {
+		selectName string
+		want       domain.AssetType
+	}{
+		{"Forex", domain.AssetForex},
+		{"Gold", domain.AssetGold},
+		{"Indices", domain.AssetIndices},
+		{"Crypto", domain.AssetCrypto},
+		{"Commodities", domain.AssetCommodity},
+		{"  INDICES  ", domain.AssetIndices},
+		{"Index", domain.AssetIndices},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.selectName, func(t *testing.T) {
+			raw := []byte(`{"id":"t-at","properties":{` +
+				`"Symbol":{"title":[{"plain_text":"XAUUSD"}]},` +
+				`"Asset Type":{"select":{"name":"` + tc.selectName + `"}}}}`)
+			tr, err := repo.parseSingleTrade(raw)
+			if err != nil {
+				t.Fatalf("parseSingleTrade failed: %v", err)
+			}
+			if tr.AssetType != tc.want {
+				t.Errorf("AssetType = %q, want %q", tr.AssetType, tc.want)
+			}
+			if !tr.AssetType.IsValid() {
+				t.Errorf("AssetType %q is not valid", tr.AssetType)
+			}
+		})
+	}
+}
+
 // TestTradeRepo_UpdateTradeClearsOptionalProperties pins the regression where
 // an update could never clear Time Window/Confluence/Notes because empty
 // values were simply omitted from the PATCH payload, leaving the old value in

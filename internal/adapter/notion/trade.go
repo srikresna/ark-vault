@@ -321,7 +321,13 @@ func (r *TradeRepo) parseSingleTrade(raw json.RawMessage) (*domain.Trade, error)
 		}
 	}
 	if page.Properties.AssetType.Select != nil {
-		t.AssetType = domain.AssetType(page.Properties.AssetType.Select.Name)
+		// Notion stores display labels ("Indices", "Gold", ...); normalize to
+		// the canonical domain constants so stats grouping and IsValid work.
+		if at, ok := domain.ParseAssetType(page.Properties.AssetType.Select.Name); ok {
+			t.AssetType = at
+		} else {
+			t.AssetType = domain.AssetType(strings.ToUpper(strings.TrimSpace(page.Properties.AssetType.Select.Name)))
+		}
 	}
 	if page.Properties.Direction.Select != nil {
 		t.Direction = domain.Direction(page.Properties.Direction.Select.Name)
