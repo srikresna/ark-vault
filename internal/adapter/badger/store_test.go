@@ -823,6 +823,183 @@ func TestStore_Reset(t *testing.T) {
 	}
 }
 
+func TestStore_ResetPreservesIdempotencyLedger(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	claimKey := IdempotencyPrefix + "scope:upd:42"
+	noticeKey := IdempotencyPrefix + "scope:notice:42"
+	cursorKey := IdempotencyPrefix + "scope:cursor"
+	claim := map[string]any{"state": "admitted", "update_id": 42}
+	notice := map[string]any{"update_id": 42, "chat_id": 7, "text": "interrupted"}
+	cursor := map[string]any{"offset": 43}
+
+	if err := store.SetWithTTL(claimKey, claim, 0); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	if err := store.SetWithTTL(noticeKey, notice, time.Hour); err != nil {
+		t.Fatalf("seed notice: %v", err)
+	}
+	if err := store.SetWithTTL(cursorKey, cursor, 0); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+	if err := NewGamificationRepo(store).SaveProfile(ctx, &domain.GamificationProfile{TelegramID: 42, TotalXP: 10}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	if err := store.Reset(); err != nil {
+		t.Fatalf("store.Reset failed: %v", err)
+	}
+
+	// The ledger must survive: dropping a pending claim would let a redelivered
+	// Telegram update replay a non-idempotent action (a second trade page, a
+	// second /undo).
+	var gotClaim map[string]any
+	if err := store.Get(claimKey, &gotClaim); err != nil {
+		t.Fatalf("claim was wiped by Reset: %v", err)
+	}
+	if gotClaim["state"] != "admitted" {
+		t.Fatalf("claim state = %v, want admitted", gotClaim["state"])
+	}
+	var gotNotice map[string]any
+	if err := store.Get(noticeKey, &gotNotice); err != nil {
+		t.Fatalf("undelivered notice was wiped by Reset: %v", err)
+	}
+	// The fetch cursor is part of the ledger: losing it would make the bot
+	// refetch updates whose rows are already admitted.
+	var gotCursor map[string]any
+	if err := store.Get(cursorKey, &gotCursor); err != nil {
+		t.Fatalf("fetch cursor was wiped by Reset: %v", err)
+	}
+	if gotCursor["offset"] != float64(43) {
+		t.Fatalf("cursor offset = %v, want 43", gotCursor["offset"])
+	}
+
+	// Everything else must still be gone.
+	if p, err := NewGamificationRepo(store).GetProfile(ctx, 42); err != nil {
+		t.Fatalf("unexpected error reading profile: %v", err)
+	} else if p != nil {
+		t.Fatalf("profile survived Reset: %+v", p)
+	}
+}
+
+// TestStore_SetWithTTLZeroNeverExpires pins the TTL contract the ledger relies
+// on: ttl <= 0 means "keep forever". Badger's Entry.WithTTL(0) sets ExpiresAt to
+// the current second, so a naive implementation makes the value invisible
+// immediately — which silently dropped admitted/running rows.
+func TestStore_SetWithTTLZeroNeverExpires(t *testing.T) {
+	store := newTestStore(t)
+
+	key := IdempotencyPrefix + "scope:upd:1"
+	value := map[string]any{"state": "admitted"}
+	if err := store.SetWithTTL(key, value, 0); err != nil {
+		t.Fatalf("SetWithTTL(0): %v", err)
+	}
+	if err := store.SetWithTTL(key+"b", value, -time.Second); err != nil {
+		t.Fatalf("SetWithTTL(negative): %v", err)
+	}
+
+	// Read back through a fresh transaction; an expiry of "now" would already be
+	// invisible here.
+	for _, k := range []string{key, key + "b"} {
+		var got map[string]any
+		if err := store.Get(k, &got); err != nil {
+			t.Fatalf("value under %q vanished: %v", k, err)
+		}
+		if got["state"] != "admitted" {
+			t.Fatalf("value under %q = %v, want admitted", k, got["state"])
+		}
+	}
+
+	// A positive TTL still works (it must not be turned into "forever").
+	if err := store.SetWithTTL(key+"c", value, time.Hour); err != nil {
+		t.Fatalf("SetWithTTL(1h): %v", err)
+	}
+	var got map[string]any
+	if err := store.Get(key+"c", &got); err != nil {
+		t.Fatalf("value with a positive TTL is missing: %v", err)
+	}
+}
+
+// TestStore_ApplyBatchIsAtomicAndInsertIfAbsent pins the admission primitive on
+// a real database: a repeated batch inserts nothing, and the cursor and rows land
+// together.
+func TestStore_ApplyBatchIsAtomicAndInsertIfAbsent(t *testing.T) {
+	store := newTestStore(t)
+
+	rows := map[string][]byte{
+		IdempotencyPrefix + "scope:upd:1": []byte(`{"update_id":1}`),
+		IdempotencyPrefix + "scope:upd:2": []byte(`{"update_id":2}`),
+	}
+	cursor := map[string][]byte{
+		IdempotencyPrefix + "scope:cursor": []byte(`{"offset":3}`),
+	}
+
+	inserted, err := store.ApplyBatch(rows, cursor)
+	if err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+	if len(inserted) != 2 {
+		t.Fatalf("inserted = %v, want both rows", inserted)
+	}
+
+	var got map[string]any
+	if err := store.Get(IdempotencyPrefix+"scope:cursor", &got); err != nil {
+		t.Fatalf("cursor missing after ApplyBatch: %v", err)
+	}
+	if got["offset"] != float64(3) {
+		t.Fatalf("cursor offset = %v, want 3", got["offset"])
+	}
+
+	// Re-applying must not report the rows again, and must still move the cursor.
+	inserted, err = store.ApplyBatch(rows, map[string][]byte{
+		IdempotencyPrefix + "scope:cursor": []byte(`{"offset":5}`),
+	})
+	if err != nil {
+		t.Fatalf("second ApplyBatch: %v", err)
+	}
+	if len(inserted) != 0 {
+		t.Fatalf("duplicate ApplyBatch inserted %v, want none", inserted)
+	}
+	got = nil
+	if err := store.Get(IdempotencyPrefix+"scope:cursor", &got); err != nil {
+		t.Fatalf("cursor missing: %v", err)
+	}
+	if got["offset"] != float64(5) {
+		t.Fatalf("cursor offset = %v, want 5", got["offset"])
+	}
+}
+
+// TestStore_SurvivesReopen pins durability: an acknowledged write must still be
+// there after the database is closed and reopened (the ledger's whole purpose).
+func TestStore_SurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	key := IdempotencyPrefix + "scope:upd:9"
+	if err := store.SetWithTTL(key, map[string]any{"state": "running"}, 0); err != nil {
+		t.Fatalf("SetWithTTL: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	var got map[string]any
+	if err := reopened.Get(key, &got); err != nil {
+		t.Fatalf("record lost across restart: %v", err)
+	}
+	if got["state"] != "running" {
+		t.Fatalf("state = %v, want running", got["state"])
+	}
+}
+
 func TestStore_BackupToDirAndRotation(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

@@ -233,23 +233,6 @@ func TestParseCommandName(t *testing.T) {
 	}
 }
 
-// TestHandler_SurvivesMalformedAndPanickingUpdates verifies that nil Chat /
-// nil From updates and even a command invoked when its backing service is nil
-// never crash the process.
-func TestHandler_SurvivesMalformedAndPanickingUpdates(t *testing.T) {
-	h, _ := newRecordingHandler(t, Services{}, 99)
-	ctx := context.Background()
-
-	// 1. Message with nil Chat
-	h.HandleUpdate(ctx, Update{Message: &Message{Text: "/help"}})
-
-	// 2. Callback with nil From
-	h.HandleUpdate(ctx, Update{CallbackQuery: &CallbackQuery{ID: "cb", Data: "confirm:yes"}})
-
-	// 3. /report when Services.Report is nil (previously a nil-pointer panic)
-	h.HandleUpdate(ctx, privateMessage(1, "/report"))
-}
-
 // --- stub stores for the report card service ---
 
 type stubTradeRepo struct{}

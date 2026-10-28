@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"github.com/arkcode369/ark-vault/internal/scheduler"
 	"github.com/arkcode369/ark-vault/internal/service"
 	"github.com/arkcode369/ark-vault/pkg/timeutil"
+	"github.com/dgraph-io/badger/v4"
 )
 
 var version = "dev"
@@ -134,6 +136,25 @@ func main() {
 	)
 	defer handler.Close()
 	bot := telegram.NewBot(cfg.TelegramToken, handler, logger)
+	// Durable update ledger: a fetched batch is stored together with the fetch
+	// cursor in one transaction, so polling never waits for handlers and
+	// Telegram can forget an update only after this bot owns a copy. A
+	// redelivered update never runs twice, and an interrupted one is reported
+	// for manual verification. The ledger survives /reset (see
+	// badger.Store.Reset).
+	bot.SetReplayGuard(telegram.ReplayStoreFuncs{
+		GetFn: func(key string, dest interface{}) (bool, error) {
+			err := store.Get(key, dest)
+			if errors.Is(err, badger.ErrKeyNotFound) {
+				return false, nil
+			}
+			return err == nil, err
+		},
+		SetFn:        store.SetWithTTL,
+		DeleteFn:     store.Delete,
+		ScanFn:       store.Scan,
+		ApplyBatchFn: store.ApplyBatch,
+	})
 	handler.SetBot(bot)
 	handler.SetResetter(store)
 	// Graceful shutdown

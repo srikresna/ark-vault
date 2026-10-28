@@ -25,7 +25,7 @@
 - **Observability & Reliability**:
   - Native daily BadgerDB snapshot backup at 03:00 WIB into `/data/badger/backups` with 7-day automatic retention.
   - Stdlib-only Prometheus metrics exposition at `http://localhost:9102/metrics` (`ark_vault_updates_total`, `ark_vault_commands_total`, `ark_vault_rate_limited_total`, etc.) and `/healthz` endpoint.
-  - Per-user ordered update processing, with up to 32 active handlers and a bounded pending queue. Completed batches are acknowledged on the next poll; interrupted batches may be redelivered.
+  - Per-user ordered update processing with a durable BadgerDB admission ledger. Updates that never started resume after restart; interrupted actions are not repeated automatically and require user verification.
 ## Architecture
 
 The project follows **Hexagonal Architecture (Ports & Adapters)** with consumer-side interfaces and a strict stdlib-first policy (`github.com/dgraph-io/badger/v4` is the sole direct dependency):

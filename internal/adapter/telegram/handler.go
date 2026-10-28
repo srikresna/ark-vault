@@ -298,6 +298,16 @@ type ambiguousWrite interface {
 	MayHaveBeenSaved() bool
 }
 
+// RecordPanic accounts for a panic that escaped HandleUpdate. The dispatcher
+// recovers it (see Bot.logUpdatePanic) so the ledger can mark the update as
+// ambiguous instead of done.
+func (h *Handler) RecordPanic(updateID int, r any) {
+	atomic.AddUint64(&h.metricPanicsTotal, 1)
+	if h.logger != nil {
+		h.logger.Error("recovered panic in update handler", "update_id", updateID, "panic", r)
+	}
+}
+
 // tradeSaveFailureMessage explains a failed trade save.
 //
 // When the failure is ambiguous the trade may already exist: telling the user to
@@ -316,16 +326,12 @@ func tradeSaveFailureMessage(err error) string {
 // arrival order (see updateDispatcher), while different users are handled
 // concurrently. That is what makes the per-user guided/edit sessions safe
 // without holding a lock across the whole update.
+// A panic is deliberately NOT recovered here: the dispatcher's worker is the
+// single recovery point, so it can tell the ledger the outcome is unknown and
+// stop the update from being recorded as handled. Swallowing it here made a
+// crashed handler look successful.
 func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 	atomic.AddUint64(&h.metricUpdatesTotal, 1)
-	defer func() {
-		if r := recover(); r != nil {
-			atomic.AddUint64(&h.metricPanicsTotal, 1)
-			if h.logger != nil {
-				h.logger.Error("recovered panic in HandleUpdate", "update_id", u.UpdateID, "panic", r)
-			}
-		}
-	}()
 	if u.CallbackQuery != nil {
 		h.handleCallback(ctx, u.CallbackQuery)
 		return
