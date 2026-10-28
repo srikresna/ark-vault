@@ -2571,25 +2571,27 @@ func TestBot_StartDefersResetUntilOlderUpdatesFinish(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("journal was never saved")
 	}
-	// The retry tick is a minute away, so the reset is still parked. What matters
-	// is that it never ran beside the journal: no wipe may happen until every
-	// older update is terminal.
-	if state, ok := store.claimState(2); !ok || state != stateAdmitted {
-		t.Fatalf("reset state = %q (found %v), want still admitted (not started)", state, ok)
-	}
-	// The row becomes done only after the handler returns, which is after
-	// SaveTrade reported its save: poll instead of racing the completion hook.
+	// The retry is event-driven now, so the reset starts as soon as the journal's
+	// row is terminal rather than on the next tick. The invariant that matters is
+	// the ordering: at the instant the reset leaves "admitted", every older row
+	// must already be terminal — a wipe may never begin while an older update
+	// could still write.
 	deadline := time.After(5 * time.Second)
 	for {
-		state, ok := store.claimState(1)
-		if ok && state == stateDone {
+		state, ok := store.claimState(2)
+		if ok && state != stateAdmitted {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("journal state = %q (found %v), want done", state, ok)
+			t.Fatal("reset never started after the older update finished")
 		case <-time.After(time.Millisecond):
 		}
+	}
+	// The row becomes done only after the handler returns, which is after
+	// SaveTrade reported its save.
+	if state, ok := store.claimState(1); !ok || state != stateDone {
+		t.Fatalf("journal state = %q (found %v), want done before the reset starts", state, ok)
 	}
 	cancel()
 	select {
@@ -3081,6 +3083,354 @@ func TestRetryDeferredDifferentUsersRetryIndependently(t *testing.T) {
 	}
 }
 
+// retryLoop is a running deferred-retry loop wired the way Start wires it.
+type retryLoop struct {
+	ran   <-chan int
+	wake  chan struct{}
+	wakes func() int
+}
+
+// startRetryLoop wires the deferred retry loop the way Start does and exposes
+// the nudge channel so a test can force a lost wakeup deterministically.
+func startRetryLoop(t *testing.T, h *ledgerHarness, replay *replayGuard) *retryLoop {
+	t.Helper()
+	ranCh := make(chan int, 16)
+	// Reuse the harness handler, but observe starts through its own channel.
+	h.d.handle = func(_ context.Context, u Update) { ranCh <- u.UpdateID }
+
+	wake := make(chan struct{}, 1)
+	var wakeCount atomic.Int64
+	h.d.setOnWake(func() {
+		wakeCount.Add(1)
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	})
+	h.d.setDeferReady(func(u Update) bool {
+		older, err := olderAhead(replay, u)
+		return err == nil && older == 0
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	b := &Bot{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), replay: replay}
+	go b.retryDeferred(ctx, h.deferred, wake, h.d, replay, done)
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return &retryLoop{ran: ranCh, wake: wake, wakes: func() int { return int(wakeCount.Load()) }}
+}
+
+// dropWake consumes any pending nudge and gives the loop a moment to settle, so
+// a following publish is the only remaining signal — the lost-wakeup state.
+func (l *retryLoop) dropWake() {
+	select {
+	case <-l.wake:
+	default:
+	}
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-l.wake:
+	default:
+	}
+}
+
+// TestRetryDeferredRechecksAfterLostWakeup pins the publish-then-recheck rule for
+// an ordinary update. A barrier can clear before the deferred update is even in
+// the retry buffer, so the wake that the clear sends finds an empty queue and is
+// consumed; the update is published afterwards. Nudging on the state change
+// alone would therefore strand it for a full tick, so the publish itself must
+// re-check readiness.
+func TestRetryDeferredRechecksAfterLostWakeup(t *testing.T) {
+	store := newMemReplayStore()
+	replay := newTestGuard(store)
+	u := privateUpdate(1, 5)
+	seedAdmitted(t, store, u)
+
+	h := newLedgerHarness(replay, nil)
+	loop := startRetryLoop(t, h, replay)
+
+	// The barrier exists and then clears while the buffer is still empty: its
+	// wake is delivered and dropped against nothing.
+	h.d.addGate(1)
+	h.d.clearGateFor(1)
+	loop.dropWake()
+
+	// Only now is the update deferred, exactly like a worker that lost the race.
+	h.d.pending <- struct{}{}
+	h.d.notifyDefer(u)
+
+	select {
+	case id := <-loop.ran:
+		if id != 5 {
+			t.Fatalf("ran update %d, want 5", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the update was never retried: the lost wakeup was not compensated")
+	}
+	if !h.d.Wait(2 * time.Second) {
+		t.Fatal("retried update did not finish")
+	}
+	if state, ok := store.claimState(5); !ok || state != stateDone {
+		t.Fatalf("row = %q (found %v), want done", state, ok)
+	}
+}
+
+// TestRetryDeferredResetRechecksAfterLostWakeup pins the same rule for the reset
+// itself, which is the case that stalls every user: the reset decides to defer,
+// the older handler finishes and its wake is consumed before the reset is in the
+// buffer, and the reset (excluded from the old nudge rule) would then wait a full
+// tick while the barrier holds everyone back.
+func TestRetryDeferredResetRechecksAfterLostWakeup(t *testing.T) {
+	store := newMemReplayStore()
+	replay := newTestGuard(store)
+
+	older := privateUpdate(1, 2)
+	reset := resetUpdate(3)
+	seedAdmitted(t, store, older)
+	seedAdmitted(t, store, reset)
+
+	h := newLedgerHarness(replay, nil)
+	loop := startRetryLoop(t, h, replay)
+
+	// The reset is admitted, so its barrier is up.
+	h.d.addGate(3)
+	// The older row finishes and its wake is dropped against an empty buffer.
+	if err := replay.markRunning(2); err != nil {
+		t.Fatalf("markRunning older: %v", err)
+	}
+	if err := replay.markDone(2); err != nil {
+		t.Fatalf("markDone older: %v", err)
+	}
+	h.d.notifyWake()
+	loop.dropWake()
+
+	// The reset is published only now: it must be re-checked, found runnable and
+	// retried immediately rather than on the next tick.
+	h.d.pending <- struct{}{}
+	h.d.notifyDefer(reset)
+
+	select {
+	case id := <-loop.ran:
+		if id != 3 {
+			t.Fatalf("ran update %d, want the reset (3)", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reset was never retried: the barrier stalled until the tick")
+	}
+	if !h.d.Wait(2 * time.Second) {
+		t.Fatal("retried reset did not finish")
+	}
+	if gate := h.d.gateUpdate(); gate != 0 {
+		t.Fatalf("gate = %d, want 0 once the reset completed", gate)
+	}
+}
+
+// TestRetryDeferredResetWakesOnClaimRelease pins the last ordering hole: the
+// reset is deferred by its own start hook, which runs while the reset still holds
+// its exclusive claim — so at publication time readyToRun correctly refuses to
+// nudge (it would be waking the loop for a wipe that is mid-decision). By then the
+// older row it waited on has already finished, so nothing is held to wake for
+// either. Releasing the claim must therefore re-check the reset itself, or the
+// barrier holds every user until the next tick.
+func TestRetryDeferredResetWakesOnClaimRelease(t *testing.T) {
+	store := newMemReplayStore()
+	replay := newTestGuard(store)
+
+	reset := resetUpdate(3)
+	seedAdmitted(t, store, reset)
+	// The older row was running when the hook checked olderPending, and finished
+	// before the reset was published: nothing is left to wait for, and nothing is
+	// left held.
+	store.seedRecord(updateRecord{UpdateID: 2, State: stateDone})
+
+	h := newLedgerHarness(replay, nil)
+	loop := startRetryLoop(t, h, replay)
+
+	// The reset takes its claim, exactly as beginRun does before the start hook.
+	if got := h.d.beginRun(reset); got != runProceed {
+		t.Fatalf("reset decision = %v, want runProceed (it takes the claim)", got)
+	}
+	// Its start hook refuses (older work was pending a moment ago), so it is
+	// published while the claim is still held: no nudge may be sent yet.
+	h.d.pending <- struct{}{}
+	h.d.notifyDefer(reset)
+	if got := loop.wakes(); got != 0 {
+		t.Fatalf("wakes = %d while the reset still holds its own claim, want 0", got)
+	}
+	select {
+	case id := <-loop.ran:
+		t.Fatalf("update %d ran while the reset held its claim", id)
+	default:
+	}
+
+	// The claim is handed back. The reset is now runnable, so this release is the
+	// only event that can unblock it.
+	h.d.endRun()
+	h.d.releaseGateClaim(reset)
+
+	select {
+	case id := <-loop.ran:
+		if id != 3 {
+			t.Fatalf("ran update %d, want the reset (3)", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reset was never retried after its claim was released")
+	}
+	// The start signal fires when the handler begins; the row is closed and the
+	// barrier released only after it returns.
+	if !h.d.Wait(2 * time.Second) {
+		t.Fatal("dispatcher did not finish the reset")
+	}
+	if gate := h.d.gateUpdate(); gate != 0 {
+		t.Fatalf("gate = %d, want 0 once the reset completed", gate)
+	}
+	if state, ok := store.claimState(3); !ok || state != stateDone {
+		t.Fatalf("reset row = %q (found %v), want done", state, ok)
+	}
+
+	// And it must settle: the release/re-check path runs on every retry, so a
+	// missing readiness guard would keep the loop spinning. Give the completion
+	// its own nudges first, then require the counter to stop moving.
+	time.Sleep(100 * time.Millisecond)
+	settled := loop.wakes()
+	time.Sleep(150 * time.Millisecond)
+	if grew := loop.wakes() - settled; grew > 0 {
+		t.Fatalf("retry loop kept spinning after the reset finished (%d extra nudges)", grew)
+	}
+}
+
+// TestRetryDeferredBlockedPublishDoesNotSpin pins the other half of the rule: a
+// publish that is still blocked must not nudge, or every deferral would start a
+// new pass and the retry loop would spin instead of sleeping.
+func TestRetryDeferredBlockedPublishDoesNotSpin(t *testing.T) {
+	// Case 1: an update newer than the barrier cannot run.
+	store := newMemReplayStore()
+	replay := newTestGuard(store)
+	h := newLedgerHarness(replay, nil)
+	loop := startRetryLoop(t, h, replay)
+	h.d.addGate(1)
+	h.d.notifyDefer(privateUpdate(1, 5))
+	if got := loop.wakes(); got != 0 {
+		t.Fatalf("wakes = %d after a blocked publish, want 0 (it would spin)", got)
+	}
+
+	// Case 2: a reset that still has older work pending cannot run either.
+	store2 := newMemReplayStore()
+	replay2 := newTestGuard(store2)
+	seedAdmitted(t, store2, privateUpdate(1, 2))
+	h2 := newLedgerHarness(replay2, nil)
+	loop2 := startRetryLoop(t, h2, replay2)
+	h2.d.addGate(9)
+	h2.d.notifyDefer(resetUpdate(9))
+	if got := loop2.wakes(); got != 0 {
+		t.Fatalf("wakes = %d after a blocked reset publish, want 0", got)
+	}
+}
+
+// TestRetryDeferredIsEventDriven pins the latency contract behind the reset
+// barrier. A reset takes its exclusive claim before the start hook decides
+// whether it may run, so an older update that arrives in that window is deferred
+// by a claim that is released microseconds later. Retrying only on the ticker
+// (a minute) would stall that user — and the reset waiting on it — for the whole
+// interval, so the release must nudge the retry loop instead.
+func TestRetryDeferredIsEventDriven(t *testing.T) {
+	store := newMemReplayStore()
+	replay := newTestGuard(store)
+
+	older := privateUpdate(1, 2)
+	reset := resetUpdate(3)
+	seedAdmitted(t, store, older)
+	seedAdmitted(t, store, reset)
+
+	ran := make(chan int, 8)
+	h := newLedgerHarness(replay, func(_ context.Context, u Update) { ran <- u.UpdateID })
+	deferrals := h.deferrals
+
+	// Wire the wake path exactly like Start does.
+	wake := make(chan struct{}, 1)
+	h.d.setOnWake(func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	})
+	b := &Bot{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), replay: replay}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go b.retryDeferred(ctx, h.deferred, wake, h.d, replay, done)
+
+	// Reproduce the interleaving deterministically: the reset claims exclusive
+	// execution (beginRun) and the older update arrives before the start hook
+	// has reported that the reset must wait.
+	if got := h.d.beginRun(reset); got != runProceed {
+		t.Fatalf("reset decision = %v, want runProceed (it takes the claim)", got)
+	}
+	if err := h.d.Enqueue(ctx, older); err != nil {
+		t.Fatalf("enqueue older update: %v", err)
+	}
+	select {
+	case id := <-deferrals:
+		if id != 2 {
+			t.Fatalf("deferred update = %d, want the older update (2)", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the older update was not deferred by the transient claim")
+	}
+	select {
+	case id := <-ran:
+		t.Fatalf("update %d ran beside the reset claim", id)
+	default:
+	}
+
+	// The reset's start hook refuses: older work is pending, so it hands the
+	// claim back. The older update must now run promptly, without the ticker.
+	h.d.endRun()
+	h.d.releaseGateClaim(reset)
+
+	select {
+	case id := <-ran:
+		if id != 2 {
+			t.Fatalf("ran update %d, want the older update (2) first", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the older update was not retried when the claim was released")
+	}
+	if !h.d.Wait(2 * time.Second) {
+		t.Fatal("older update did not finish")
+	}
+	if state, ok := store.claimState(2); !ok || state != stateDone {
+		t.Fatalf("older row = %q (found %v), want done", state, ok)
+	}
+	// The reset is still pending: nothing has wiped yet, and the barrier holds.
+	if gate := h.d.gateUpdate(); gate != 3 {
+		t.Fatalf("gate = %d, want 3 until the reset completes", gate)
+	}
+	if state, ok := store.claimState(3); !ok || state != stateAdmitted {
+		t.Fatalf("reset row = %q (found %v), want admitted", state, ok)
+	}
+
+	// The completion of the older row is the reset's unblock event. Enqueueing it
+	// again now (a fresh admission, so it takes its own pending token) must run
+	// it: nothing older is unfinished any more.
+	if err := h.d.Enqueue(ctx, reset); err != nil {
+		t.Fatalf("re-enqueue reset: %v", err)
+	}
+	select {
+	case id := <-ran:
+		if id != 3 {
+			t.Fatalf("ran update %d, want the reset (3)", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reset did not run once the older update was terminal")
+	}
+	cancel()
+	<-done
+}
+
 // TestUpdateDispatcher_DeferredResetLetsOlderAdmittedWorkRun pins the barrier's
 // liveness contract: a reset deferred because an older row is still admitted
 // must not freeze the barrier. The older row still runs — the reset is waiting
@@ -3542,19 +3892,27 @@ func TestBot_StartFailsClosedWhenCompletionCannotBeRecorded(t *testing.T) {
 		{"update_id":1,"message":{"message_id":1,"from":{"id":84,"username":"a"},"chat":{"id":84,"type":"private"},"text":"#journal\nPair: EURUSD\nType: BUY\nRR: +2"}}
 	]}`
 	repo := &gatedTradeRepo{started: make(chan struct{}), release: make(chan struct{}), savedCh: make(chan savedTrade, 4)}
-	close(repo.release)
+	t.Cleanup(func() {
+		select {
+		case <-repo.release:
+		default:
+			close(repo.release)
+		}
+	})
 	store := newMemReplayStore()
 
 	_, _, errCh, cancel := replayTestBot(t, batch, repo, store)
 	t.Cleanup(cancel)
 
-	// Let the handler finish, then break only the completion write.
+	// The running-state write completed before SaveTrade starts; block the
+	// handler until the completion-write failure is installed.
 	select {
-	case <-repo.savedCh:
+	case <-repo.started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("journal never saved")
+		t.Fatal("journal never started")
 	}
 	store.failSet = func(key string) error { return errors.New("badger write failed") }
+	close(repo.release)
 
 	select {
 	case err := <-errCh:

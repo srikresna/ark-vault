@@ -978,24 +978,66 @@ func (g *replayGuard) flushNotices(ctx context.Context, sender *Sender) {
 // for older work, and the updates that must wait behind that reset or behind an
 // older deferred update of their own user.
 //
+// A pass runs when the dispatcher reports a state change that could unblock
+// something (an update finished, a reset released its claim or cleared the
+// barrier), and on a slow ticker as a safety net. The event path is what keeps
+// the barrier prompt: a reset can take and release its exclusive claim within
+// microseconds, so an older update can be deferred by a barrier that is already
+// gone, and waiting for the tick would stall that user for a whole interval.
+//
 // It must be joined before the dispatcher is waited on and before the store is
 // closed (it calls EnqueueRetry, which registers work with the dispatcher). Every
 // failure that would strand a durable row is reported as fatal instead of being
 // logged and skipped.
-func (b *Bot) retryDeferred(ctx context.Context, deferred chan Update, dispatcher *updateDispatcher, replay *replayGuard, done chan<- struct{}) {
+func (b *Bot) retryDeferred(ctx context.Context, deferred chan Update, wake <-chan struct{}, dispatcher *updateDispatcher, replay *replayGuard, done chan<- struct{}) {
 	defer close(done)
 	ticker := time.NewTicker(replayNoticeInterval)
 	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+		// Snapshot before the pass. A wake that lands during the pass may have
+		// found the buffer still empty — the update that it unblocks can be
+		// published microseconds later — so the sequence is re-checked after the
+		// pass instead of trusting the channel alone.
+		seq := dispatcher.stateSeq()
 		if !b.retryDeferredOnce(ctx, deferred, dispatcher, replay) {
 			return
 		}
+		if ctx.Err() != nil {
+			return
+		}
+		if dispatcher.stateSeq() != seq {
+			continue // something changed while the pass ran: look again now
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		case <-ticker.C:
+		}
 	}
+}
+
+// olderAhead reports how many unfinished rows the update must wait for before it
+// may run.
+//
+// Readiness is scoped to what the update actually orders against:
+//   - a destructive reset waits for the WHOLE ledger (olderPending), because a
+//     write from any user after the wipe would resurrect pre-reset state;
+//   - every other update waits only for its own user's older rows, which is the
+//     same FIFO the dispatcher enforces in-process. Using the global rule here
+//     parked unrelated users' deferred updates behind one another and let at
+//     most one run per retry tick.
+//
+// An update without a user has no ordering scope, so it falls back to the global
+// rule.
+func olderAhead(replay *replayGuard, u Update) (int, error) {
+	if isDestructiveReset(u) {
+		return replay.olderPending(u.UpdateID)
+	}
+	if key, keyed := updateKey(u); keyed {
+		return replay.olderPendingForUser(u.UpdateID, key)
+	}
+	return replay.olderPending(u.UpdateID)
 }
 
 // retryDeferredOnce retries every deferred update that was queued when it was
@@ -1028,28 +1070,10 @@ func (b *Bot) retryDeferredOnce(ctx context.Context, deferred chan Update, dispa
 			}
 			continue
 		}
-		// Readiness is scoped to what the update actually orders against:
-		//   - a destructive reset waits for the WHOLE ledger (olderPending),
-		//     because a write from any user after the wipe would resurrect
-		//     pre-reset state;
-		//   - every other update waits only for its own user's older rows, which
-		//     is the same FIFO the dispatcher enforces in-process. Using the
-		//     global rule here parked unrelated users' deferred updates behind
-		//     one another and let at most one run per retry tick.
-		// An update without a user has no ordering scope, so it falls back to the
-		// global rule.
-		var (
-			older int
-			err   error
-		)
-		switch key, keyed := updateKey(u); {
-		case isDestructiveReset(u):
-			older, err = replay.olderPending(u.UpdateID)
-		case keyed:
-			older, err = replay.olderPendingForUser(u.UpdateID, key)
-		default:
-			older, err = replay.olderPending(u.UpdateID)
-		}
+		// Readiness is scoped to what the update actually orders against; see
+		// olderAhead. The same predicate backs the dispatcher's readiness
+		// re-check, so a nudge is never sent for work that would only re-defer.
+		older, err := olderAhead(replay, u)
 		if err != nil {
 			// Cannot decide whether it is safe to run: fail closed.
 			dispatcher.fail(fmt.Errorf("deferred update %d: %w", u.UpdateID, err))
@@ -1135,7 +1159,22 @@ func (b *Bot) Start(ctx context.Context) error {
 	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelWork()
 	dispatcher := newUpdateDispatcher(workCtx, maxConcurrentUpdates, b.handler.HandleUpdate, b.logUpdatePanic)
-	dispatcher.resetCheck = b.resetBarrier
+	// The reset barrier exists only to keep a wipe from overlapping older work,
+	// and it is released by the completion hook that records the reset terminal.
+	// Both halves live in the ledger wiring below, so without a ledger the barrier
+	// cannot be both live and safe: enabling it would either strand the wipe
+	// forever (no release path) or stall every later update for the lifetime of
+	// the process. It is therefore disabled, and the consequence is reported
+	// rather than left implicit — see the warning below.
+	if b.replay != nil {
+		dispatcher.resetCheck = b.resetBarrier
+	} else {
+		// Clear the constructor's default rule for the same reason.
+		dispatcher.resetCheck = nil
+		b.logger.Warn("replay ledger is not configured: Telegram updates are not protected " +
+			"against duplicate execution, and an owner /reset is not serialised against " +
+			"other users' in-flight updates")
+	}
 	// A fatal ledger condition must interrupt a long poll immediately, not
 	// after its 30s timeout: cancel the fetch context and prefer the fatal
 	// error when reporting why Start returned.
@@ -1243,17 +1282,36 @@ func (b *Bot) Start(ctx context.Context) error {
 		// durable row until the next restart.
 		deferred := make(chan Update, maxPendingUpdates)
 		deferDone := make(chan struct{})
+		// wake coalesces state-change nudges: capacity 1 is enough because the
+		// retry loop re-checks the whole queue on every pass, so several events
+		// arriving during a pass need only one pending signal.
+		wake := make(chan struct{}, 1)
+		dispatcher.setOnWake(func() {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		})
 		dispatcher.setOnDefer(func(u Update) {
 			if !requeue(deferred, u) {
 				// Dropping it would strand a durable row until the next start.
 				dispatcher.fail(fmt.Errorf("deferred update %d could not be queued", u.UpdateID))
 			}
 		})
-		go b.retryDeferred(noticeCtx, deferred, dispatcher, replay, deferDone)
+		// The ledger half of the readiness re-check: an update is only worth
+		// nudging for once nothing older is unfinished. Errors count as "not
+		// ready", so a transient ledger failure costs a tick instead of a spin;
+		// the pass itself still fails closed when it cannot decide.
+		dispatcher.setDeferReady(func(u Update) bool {
+			older, err := olderAhead(replay, u)
+			return err == nil && older == 0
+		})
+		go b.retryDeferred(noticeCtx, deferred, wake, dispatcher, replay, deferDone)
 		// Join the retry goroutine before the dispatcher is waited on: it calls
-		// Enqueue, which must not race WaitGroup.Wait, and it uses the store that
-		// main closes right after Start returns. Registered after the shutdown
-		// defer, so it runs first (LIFO); it cancels the shared context itself.
+		// EnqueueRetry, which must not race WaitGroup.Wait, and it uses the store
+		// that main closes right after Start returns. Registered after the
+		// shutdown defer, so it runs first (LIFO); it cancels the shared context
+		// itself.
 		defer func() {
 			stopNotices()
 			<-noticeDone
@@ -1556,6 +1614,22 @@ type updateDispatcher struct {
 	onStart func(Update) error
 	onDefer func(Update)
 	onDone  func(Update, updateOutcome)
+	// onWake is called whenever a deferred update may have become runnable: an
+	// update finished (a row became terminal), a reset that could not start
+	// released its exclusive claim, a finished reset cleared the barrier, or a
+	// deferral was published and found runnable on re-check. Without it the retry
+	// loop only ran on its ticker, so an update deferred during a transient
+	// barrier claim waited up to a full interval even though nothing was blocking
+	// it any more.
+	onWake func()
+	// deferReady is the ledger half of readyToRun: whether the update has no
+	// older unfinished row it must wait for. Start installs it because only the
+	// Bot owns the ledger.
+	deferReady func(Update) bool
+	// wakeSeq counts wake events. The retry loop snapshots it around a pass and
+	// re-runs immediately when it changed: an unblock event that lands between
+	// the pass and the wait would otherwise be lost.
+	wakeSeq atomic.Uint64
 	// fatal broadcasts a condition the bot cannot continue past (a durable
 	// state write failed). fatalErr retains it: a channel carrying the error
 	// would be consumed by whichever goroutine read first, leaving the others
@@ -1660,6 +1734,66 @@ func (d *updateDispatcher) notifyDefer(u Update) {
 	if fn != nil {
 		fn(u)
 	}
+	// Publish, then re-check readiness. The hook above puts the update in the
+	// retry buffer, and only now can a nudge be trusted: an unblock event that
+	// fires before the publish (an older handler finishing, a reset releasing its
+	// claim, a barrier clearing) finds an empty buffer, consumes its wake and
+	// goes back to sleep — the classic lost wakeup. Re-checking after the publish
+	// closes that window without hot-looping: the check is a pure read, so a
+	// genuinely blocked update (barrier up, claim held, older work pending)
+	// produces no wake at all, while a runnable one is retried immediately
+	// instead of a tick later.
+	if d.readyToRun(u) {
+		d.notifyWake()
+	}
+}
+
+// readyToRun reports whether a deferred update would be allowed to start now.
+//
+// It mirrors beginRun's gate and hold rules and then defers to the ledger check
+// installed by Start (older work still unfinished). It is only used to decide
+// whether a nudge is worth sending, so being conservative is harmless: a missed
+// nudge costs one tick, while a spurious one would spin the retry loop.
+func (d *updateDispatcher) readyToRun(u Update) bool {
+	if d.stopped.Load() {
+		return false
+	}
+	reset := d.resetCheck != nil && d.resetCheck(u)
+
+	d.gateMu.Lock()
+	gate := d.gateMin()
+	active := d.gateActive
+	running := d.running
+	d.gateMu.Unlock()
+
+	switch {
+	case reset:
+		if active != 0 || running > 0 || gate != u.UpdateID {
+			return false
+		}
+	case gate != 0:
+		// Newer than the barrier, or the wipe is already running: not yet.
+		if active != 0 || u.UpdateID > gate {
+			return false
+		}
+	}
+	if key, ok := updateKey(u); ok && d.heldBefore(key, u.UpdateID) {
+		return false
+	}
+
+	d.hookMu.Lock()
+	ledger := d.deferReady
+	d.hookMu.Unlock()
+	return ledger == nil || ledger(u)
+}
+
+// setDeferReady installs the ledger half of the readiness check: whether no
+// older row the update waits on is still unfinished. Start supplies it because
+// only the Bot owns the ledger.
+func (d *updateDispatcher) setDeferReady(fn func(Update) bool) {
+	d.hookMu.Lock()
+	d.deferReady = fn
+	d.hookMu.Unlock()
 }
 
 // hold records that updateID of user key is deferred and awaiting a retry.
@@ -1712,6 +1846,30 @@ func (d *updateDispatcher) heldBefore(key int64, updateID int) bool {
 	i := sort.SearchInts(ids, updateID)
 	return i > 0
 }
+
+// setOnWake installs the hook that nudges the deferred-retry loop.
+func (d *updateDispatcher) setOnWake(fn func()) {
+	d.hookMu.Lock()
+	d.onWake = fn
+	d.hookMu.Unlock()
+}
+
+// notifyWake reports that a deferred update may now be runnable. It also bumps
+// the wake sequence, which is what makes the nudge unlosable: the retry loop
+// re-checks the counter around each pass, so an event that lands while a pass is
+// running is not swallowed.
+func (d *updateDispatcher) notifyWake() {
+	d.wakeSeq.Add(1)
+	d.hookMu.Lock()
+	fn := d.onWake
+	d.hookMu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// stateSeq returns the current wake sequence.
+func (d *updateDispatcher) stateSeq() uint64 { return d.wakeSeq.Load() }
 
 // setOnDone installs the completion hook called once per accepted update.
 func (d *updateDispatcher) setOnDone(fn func(Update, updateOutcome)) {
@@ -1935,7 +2093,7 @@ func (d *updateDispatcher) run(ctx context.Context, u Update) (consumed bool) {
 		// and defer the very updates the reset waits for, so olderPending could
 		// never reach zero and the barrier would deadlock.
 		if reset && !started {
-			d.releaseGateClaim(u.UpdateID)
+			d.releaseGateClaim(u)
 		}
 		<-d.exec
 		outcome := updateOutcome{
@@ -1961,6 +2119,14 @@ func (d *updateDispatcher) run(ctx context.Context, u Update) (consumed bool) {
 			// abort is excluded: the process is exiting and the ledger replays
 			// the reset as unfinished.
 			d.fail(fmt.Errorf("reset %d did not complete; blocking later updates", u.UpdateID))
+		}
+		// This update's row is terminal now (or it never started), so anything
+		// parked behind it — an older-dependent reset, or this user's later
+		// updates — may be runnable. Nudging here keeps the retry latency tied
+		// to the event rather than to the tick interval. Skipped after a
+		// fail-stop, where nothing may start again.
+		if !deferred && !d.Stopped() {
+			d.notifyWake()
 		}
 		// A panic or a deferral still consumes the update: the row stays
 		// running or admitted, and the rest of this user's queue must keep
@@ -2102,12 +2268,41 @@ func (d *updateDispatcher) beginRun(u Update) runDecision {
 // did not actually start. The gate stays pending, so the barrier still holds
 // later updates and the retry can start the reset as soon as the work it waits
 // on is terminal.
-func (d *updateDispatcher) releaseGateClaim(updateID int) {
+func (d *updateDispatcher) releaseGateClaim(u Update) {
+	released := false
 	d.gateMu.Lock()
-	if d.gateActive == updateID {
+	if d.gateActive == u.UpdateID {
 		d.gateActive = 0
+		released = true
 	}
 	d.gateMu.Unlock()
+	if !released {
+		return
+	}
+	// Releasing the claim is an unblock event in its own right, and it is the
+	// only one in the common case: the reset is deferred by its own start hook
+	// (which runs while it still holds the claim, so its publish could not nudge)
+	// and the older row it waited on has already finished, so nothing is held to
+	// wake for. Re-check the reset now that it no longer blocks itself and nudge
+	// only if it really could run: a reset that still has older work pending
+	// re-claims and releases on every retry, so an unconditional wake here would
+	// spin the retry loop.
+	if d.hasHeldOlderThan(u.UpdateID) || d.readyToRun(u) {
+		d.notifyWake()
+	}
+}
+
+// hasHeldOlderThan reports whether a deferred update older than gateID is
+// waiting for a retry.
+func (d *updateDispatcher) hasHeldOlderThan(gateID int) bool {
+	d.holdMu.Lock()
+	defer d.holdMu.Unlock()
+	for _, ids := range d.held {
+		if len(ids) > 0 && ids[0] < gateID {
+			return true
+		}
+	}
+	return false
 }
 
 // endRun releases the running count taken by beginRun.
@@ -2151,11 +2346,16 @@ func (d *updateDispatcher) gateUpdate() int {
 // reset, if any.
 func (d *updateDispatcher) clearGateFor(updateID int) {
 	d.gateMu.Lock()
+	_, wasPending := d.gateIDs[updateID]
 	delete(d.gateIDs, updateID)
 	if d.gateActive == updateID {
 		d.gateActive = 0
 	}
 	d.gateMu.Unlock()
+	if wasPending {
+		// Everything that was waiting behind this reset may run now.
+		d.notifyWake()
+	}
 }
 
 // fail reports a condition the bot must stop on, once, and fences all further
