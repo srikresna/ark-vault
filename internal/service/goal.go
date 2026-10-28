@@ -213,22 +213,14 @@ func (s *GoalService) calculateFromTrades(ctx context.Context, telegramID int64,
 		return total, nil
 
 	case domain.GoalWinRate:
-		// Win rate over closed trades only (WIN+LOSS+BE), consistent with
-		// domain.CalculateStats: OPEN trades must not drag the denominator.
-		var wins, closed int
-		for _, t := range monthTrades {
-			switch t.Status {
-			case domain.StatusWin:
-				wins++
-				closed++
-			case domain.StatusLoss, domain.StatusBE:
-				closed++
-			}
-		}
-		if closed == 0 {
+		// Win rate over closed trades only (WIN+LOSS+BE), using the same
+		// domain definition as /stats: OPEN trades must not drag the
+		// denominator, and break-evens dilute the rate.
+		counts := domain.CountResults(monthTrades)
+		if counts.Closed() == 0 {
 			return 0, nil
 		}
-		return float64(wins) / float64(closed) * 100, nil
+		return counts.WinRate(), nil
 
 	default:
 		return 0, nil

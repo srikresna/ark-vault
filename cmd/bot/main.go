@@ -87,6 +87,9 @@ func main() {
 	reminderSvc := service.NewReminderService(reminderRepo, gamRepo, logger)
 	goalSvc := service.NewGoalService(goalRepo, tradeRepo, gamSvc, badgeSvc)
 
+	// Post-trade reward orchestration (XP, badges, monthly goal)
+	postTradeSvc := service.NewPostTradeService(gamSvc, badgeSvc, goalSvc)
+
 	// Gemini AI (optional)
 	var aiAnalyzer service.AIAnalyzer
 	if cfg.GeminiAPIKey != "" {
@@ -123,6 +126,7 @@ func main() {
 		Goal:         goalSvc,
 		Analytics:    analyticsSvc,
 		ReportCard:   reportCardSvc,
+		PostTrade:    postTradeSvc,
 	}
 	handler := telegram.NewHandler(
 		sender, svc, exp, tradeRepo, memberRepo, limiter, logger,
@@ -322,10 +326,12 @@ func main() {
 		},
 	})
 
-	// Daily gamification pruning (04:00 WIB): XP events and trade-XP grants
-	// have no consumer older than a couple of months (daily cap = today,
-	// report cards = current/previous month), but they slow every scan and
-	// grow the Badger value log unboundedly under the 128M container limit.
+	// Daily gamification pruning (04:00 WIB): XP events have no consumer older
+	// than a couple of months (daily cap = today, report cards = current and
+	// previous month), but they slow every scan and grow the Badger value log
+	// unboundedly under the 128M container limit. Trade-XP grants are exempt:
+	// they record what each trade actually earned and are still needed if that
+	// trade is edited or deleted later; they go away with the trade itself.
 	sched.Add(scheduler.Job{
 		Name:     "gam-prune",
 		Interval: 1 * time.Hour,

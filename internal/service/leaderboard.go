@@ -9,13 +9,14 @@ import (
 	"github.com/arkcode369/ark-vault/internal/domain"
 	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
+
 // LeaderboardEntry represents one member's ranking.
 type LeaderboardEntry struct {
-	Username   string
-	FirstName  string
-	TelegramID int64
-	WinRate    float64
-	TotalRR    float64
+	Username    string
+	FirstName   string
+	TelegramID  int64
+	WinRate     float64
+	TotalRR     float64
 	TotalTrades int
 }
 
@@ -52,7 +53,7 @@ func (s *LeaderboardService) GetLeaderboardByPeriod(ctx context.Context, metric,
 		}
 		filtered := domain.FilterTradesByPeriod(trades, period, now)
 		stats := domain.CalculateStats(filtered)
-		closedTrades := stats.Wins + stats.Losses + stats.BreakEvens
+		closedTrades := domain.ClosedTrades(stats.Wins, stats.Losses, stats.BreakEvens)
 		if closedTrades < minTrades {
 			continue
 		}

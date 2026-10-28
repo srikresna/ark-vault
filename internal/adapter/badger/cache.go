@@ -52,6 +52,15 @@ func (r *MemberCacheRepo) SaveCachedMember(_ context.Context, member *domain.Mem
 	return r.store.Set(memberCacheKey(member.TelegramID), member)
 }
 
+// DeleteCachedMember removes a single persisted member mapping.
+//
+// Missing keys are not an error: Reset deletes the mappings of the journals it
+// archived, and a member discovered from Notion rather than from the cache has
+// no mapping to begin with.
+func (r *MemberCacheRepo) DeleteCachedMember(_ context.Context, telegramID int64) error {
+	return r.store.Delete(memberCacheKey(telegramID))
+}
+
 // ListCachedMembers returns all persisted members from BadgerDB.
 func (r *MemberCacheRepo) ListCachedMembers(_ context.Context) ([]domain.Member, error) {
 	raw, err := r.store.Scan(memberCachePrefix)

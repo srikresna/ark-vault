@@ -8,15 +8,16 @@ import (
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
+
 // WeeklySummary holds aggregated data for a weekly community report.
 type WeeklySummary struct {
-	PeriodStart  time.Time
-	PeriodEnd    time.Time
-	TotalTrades  int
-	TotalMembers int
-	CommunityWR  float64
-	TotalRR      float64
-	MostTraded   string // most popular symbol
+	PeriodStart   time.Time
+	PeriodEnd     time.Time
+	TotalTrades   int
+	TotalMembers  int
+	CommunityWR   float64 // wins / (wins+losses+BE) across the week; OPEN excluded
+	TotalRR       float64
+	MostTraded    string // most popular symbol
 	TopPerformers []LeaderboardEntry
 }
 
@@ -44,7 +45,7 @@ func (s *ReportService) GenerateWeeklySummary(ctx context.Context, weekStart, we
 	}
 
 	symbolCount := make(map[string]int)
-	var allWins, allClosed int
+	var community domain.ResultCounts
 	var entries []LeaderboardEntry
 
 	for _, m := range members {
@@ -70,8 +71,9 @@ func (s *ReportService) GenerateWeeklySummary(ctx context.Context, weekStart, we
 		stats := domain.CalculateStats(weekTrades)
 		summary.TotalTrades += stats.TotalTrades
 		summary.TotalRR += stats.TotalRR
-		allWins += stats.Wins
-		allClosed += stats.Wins + stats.Losses
+		community.Wins += stats.Wins
+		community.Losses += stats.Losses
+		community.BreakEvens += stats.BreakEvens
 
 		entries = append(entries, LeaderboardEntry{
 			Username:    m.Username,
@@ -83,9 +85,7 @@ func (s *ReportService) GenerateWeeklySummary(ctx context.Context, weekStart, we
 		})
 	}
 
-	if allClosed > 0 {
-		summary.CommunityWR = float64(allWins) / float64(allClosed) * 100
-	}
+	summary.CommunityWR = community.WinRate()
 
 	// Find most traded symbol
 	maxCount := 0

@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/arkcode369/ark-vault/internal/domain"
 	"github.com/arkcode369/ark-vault/internal/service"
@@ -21,6 +22,9 @@ type Exporter interface {
 }
 
 // Services bundles all application services for the handler.
+//
+// PostTrade is optional: when nil, recording or updating a trade sends the
+// plain confirmation and no reward notifications.
 type Services struct {
 	Journal      *service.JournalService
 	Leaderboard  *service.LeaderboardService
@@ -32,6 +36,7 @@ type Services struct {
 	Goal         *service.GoalService
 	Analytics    *service.AnalyticsService
 	ReportCard   *service.ReportCardService
+	PostTrade    *service.PostTradeService
 }
 
 // Resetter resets all BadgerDB state.
@@ -42,6 +47,17 @@ type Resetter interface {
 // NotionResetter archives all Notion member pages and clears the member cache.
 type NotionResetter interface {
 	ResetAll(ctx context.Context) (int, error)
+}
+
+// ResetFinalizer is implemented by a NotionResetter that can run a follow-up
+// step (the BadgerDB wipe) while its journaling lease is still held.
+//
+// Without it the reset releases the lease after archiving, so a journal write
+// can land between the archive and the store wipe — its mapping is then erased
+// by the wipe while its journal stays in Notion, and the next trade creates a
+// second journal for that member.
+type ResetFinalizer interface {
+	ResetAllWith(ctx context.Context, finalize func() error) (int, error)
 }
 
 // TradeEditField identifies which trade attribute is awaiting free-text input.
@@ -276,7 +292,30 @@ func isJournalMessage(text string) bool {
 	return strings.HasPrefix(strings.ToLower(text), "#journal")
 }
 
+// ambiguousWrite is implemented by errors whose write may have reached Notion
+// even though it was reported as failed.
+type ambiguousWrite interface {
+	MayHaveBeenSaved() bool
+}
+
+// tradeSaveFailureMessage explains a failed trade save.
+//
+// When the failure is ambiguous the trade may already exist: telling the user to
+// retry would duplicate it, so they are pointed at /history instead.
+func tradeSaveFailureMessage(err error) string {
+	var ambiguous ambiguousWrite
+	if errors.As(err, &ambiguous) && ambiguous.MayHaveBeenSaved() {
+		return "⚠️ Trade mungkin sudah tersimpan, tapi Notion tidak mengonfirmasi. Cek /history dulu — jangan kirim ulang sebelum memastikan."
+	}
+	return "❌ Gagal menyimpan trade. Silakan coba lagi."
+}
+
 // HandleUpdate processes a single Telegram update.
+//
+// Bot guarantees that updates from one user are passed here one at a time, in
+// arrival order (see updateDispatcher), while different users are handled
+// concurrently. That is what makes the per-user guided/edit sessions safe
+// without holding a lock across the whole update.
 func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 	atomic.AddUint64(&h.metricUpdatesTotal, 1)
 	defer func() {
@@ -323,7 +362,7 @@ func (h *Handler) HandleUpdate(ctx context.Context, u Update) {
 			h.handleTradeEditInput(ctx, msg, editSess)
 			return
 		}
-		if session := h.guided.Get(msg.From.ID); session != nil && !strings.HasPrefix(text, "/") {
+		if session := h.guided.Get(msg.From.ID); session != nil && !strings.HasPrefix(text, "/") && !isJournalMessage(text) {
 			h.handleGuidedInput(ctx, msg, session)
 			return
 		}
@@ -356,7 +395,7 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 
 	if err := h.svc.Journal.RecordTrade(ctx, msg.From.ID, username, firstName, trade); err != nil {
 		h.logger.Error("record trade failed", "error", err)
-		_, _ = h.sender.SendText(ctx, msg.Chat.ID, "❌ Gagal menyimpan trade. Silakan coba lagi.", msg.MessageThreadID)
+		_, _ = h.sender.SendText(ctx, msg.Chat.ID, tradeSaveFailureMessage(err), msg.MessageThreadID)
 		return
 	}
 
@@ -372,43 +411,39 @@ func (h *Handler) handleTextJournal(ctx context.Context, msg *Message, text stri
 	h.notifyTradeRecorded(ctx, msg.From.ID, trade, msg.Chat.ID, msg.MessageThreadID)
 }
 
-// notifyTradeRecorded sends the trade confirmation (with XP/level/streak if
-// gamification is enabled) and evaluates badge and monthly goal rewards.
+// notifyTradeRecorded sends the trade confirmation (XP variant when
+// gamification is enabled) followed by the service-derived badge and goal
+// notifications. trade.ScreenshotURL must already be set or the screenshot XP
+// is missed; reward failures are logged and never fail the journaling flow.
 func (h *Handler) notifyTradeRecorded(ctx context.Context, userID int64, trade *domain.Trade, chatID int64, threadID int) {
 	revengeWarn := h.checkRevengeWarning(ctx, userID, trade)
 
-	if h.svc.Gamification != nil {
-		gamResult, err := h.svc.Gamification.OnTradeRecorded(ctx, userID, trade)
-		if err != nil {
-			h.logger.Error("gamification failed", "error", err)
-		} else if gamResult != nil {
-			confirmText := FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak) + revengeWarn
-			_, _ = h.sender.SendHTML(ctx, chatID, confirmText, threadID)
-			h.evaluatePostTradeRewards(ctx, userID, trade, chatID, threadID)
-			return
-		}
+	gamResult, err := h.svc.PostTrade.ApplyTradeRewards(ctx, userID, trade)
+	if err != nil {
+		h.logger.Error("gamification failed", "error", err)
 	}
-
-	_, _ = h.sender.SendHTML(ctx, chatID, FormatTradeConfirmation(trade)+revengeWarn, threadID)
-}
-
-// evaluatePostTradeRewards checks badge unlocks and monthly goal completion
-// after a trade is recorded or updated.
-func (h *Handler) evaluatePostTradeRewards(ctx context.Context, userID int64, trade *domain.Trade, chatID int64, threadID int) {
-	if h.svc.Gamification == nil {
+	if gamResult == nil {
+		_, _ = h.sender.SendHTML(ctx, chatID, FormatTradeConfirmation(trade)+revengeWarn, threadID)
 		return
 	}
-	if h.svc.Badge != nil {
-		streak, _ := h.svc.Gamification.GetStreak(ctx, userID)
-		newBadges, _ := h.svc.Badge.CheckAndAwardBadges(ctx, userID, trade, streak)
-		if len(newBadges) > 0 {
-			_, _ = h.sender.SendHTML(ctx, chatID, FormatBadgeUnlock(newBadges), threadID)
-		}
+
+	confirmText := FormatTradeConfirmationWithXP(trade, gamResult.XPGained, gamResult.TotalXP, gamResult.Level, gamResult.Title, gamResult.LeveledUp, gamResult.Streak) + revengeWarn
+	_, _ = h.sender.SendHTML(ctx, chatID, confirmText, threadID)
+
+	// Badge and goal evaluation reads the member's trade history, so it runs
+	// after the confirmation is on the wire.
+	h.notifyPostTradeRewards(ctx, h.svc.PostTrade.EvaluateRewards(ctx, userID, trade), chatID, threadID)
+}
+
+// notifyPostTradeRewards sends the badge-unlock and monthly-goal notifications
+// for a trade whose rewards were already applied.
+func (h *Handler) notifyPostTradeRewards(ctx context.Context, rewards service.PostTradeRewards, chatID int64, threadID int) {
+	if len(rewards.Badges) > 0 {
+		_, _ = h.sender.SendHTML(ctx, chatID, FormatBadgeUnlock(rewards.Badges), threadID)
 	}
-	if h.svc.Goal != nil {
-		if achieved, _ := h.svc.Goal.CheckGoalCompletion(ctx, userID); achieved {
-			_, _ = h.sender.SendHTML(ctx, chatID, "🎯 <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +75 XP!", threadID)
-		}
+	if rewards.GoalAchieved {
+		goalText := fmt.Sprintf("🎯 <b>Monthly Goal Achieved!</b>\n\nSelamat! Kamu telah mencapai target bulananmu. +%d XP!", domain.XPGoalAchieved)
+		_, _ = h.sender.SendHTML(ctx, chatID, goalText, threadID)
 	}
 }
 
@@ -850,7 +885,7 @@ func (h *Handler) submitGuidedTrade(ctx context.Context, from *User, session *Gu
 	err := h.svc.Journal.RecordTrade(ctx, from.ID, from.Username, from.FirstName, trade)
 	if err != nil {
 		h.logger.Error("guided submit failed", "error", err)
-		_, _ = h.sender.SendText(ctx, session.ChatID, "❌ Gagal menyimpan trade. Silakan coba lagi.", session.ThreadID)
+		_, _ = h.sender.SendText(ctx, session.ChatID, tradeSaveFailureMessage(err), session.ThreadID)
 		h.guided.Remove(from.ID)
 		return
 	}
@@ -1132,21 +1167,49 @@ func (h *Handler) cmdReset(ctx context.Context, msg *Message, text string) {
 
 func (h *Handler) executeReset(ctx context.Context, chatID int64, threadID int) {
 	archivedCount := 0
-	if nr, ok := h.members.(NotionResetter); ok && nr != nil {
-		n, err := nr.ResetAll(ctx)
-		archivedCount = n
-		if err != nil {
-			h.logger.Error("notion reset failed", "error", err)
-			_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("⚠️ Sebagian reset Notion gagal (%d halaman diarsipkan). Cek log server untuk detail.", archivedCount), threadID)
+
+	var badgerErr error
+	wipeBadger := func() error {
+		if h.resetter == nil {
+			return nil
 		}
+		badgerErr = h.resetter.Reset()
+		return badgerErr
 	}
-	if h.resetter != nil {
-		if err := h.resetter.Reset(); err != nil {
-			h.logger.Error("badger reset failed", "error", err)
-			_, _ = h.sender.SendText(ctx, chatID, "❌ Gagal mereset BadgerDB.", threadID)
+
+	if nr, ok := h.members.(NotionResetter); ok && nr != nil {
+		var err error
+		if rf, canHold := h.members.(ResetFinalizer); canHold {
+			// The BadgerDB wipe runs while the member repository still holds
+			// its journaling lease, so no journal write can slip between the
+			// archive and the wipe and be erased by it.
+			archivedCount, err = rf.ResetAllWith(ctx, wipeBadger)
+		} else {
+			archivedCount, err = nr.ResetAll(ctx)
+			if err == nil {
+				err = wipeBadger()
+			}
+		}
+		if err != nil {
+			if badgerErr != nil {
+				h.logger.Error("badger reset failed", "error", badgerErr)
+				_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("❌ Gagal mereset BadgerDB (%d halaman Notion sudah diarsipkan).", archivedCount), threadID)
+				return
+			}
+			// Stop before touching BadgerDB. Wiping gamification state while
+			// member journals survive in Notion leaves the two stores out of
+			// sync and cannot be undone by retrying /reset, whereas aborting
+			// here keeps every cache and profile intact for a retry.
+			h.logger.Error("notion reset failed", "error", err)
+			_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("❌ Reset dibatalkan: arsip Notion gagal (%d halaman diarsipkan). BadgerDB tidak diubah — silakan coba /reset lagi.", archivedCount), threadID)
 			return
 		}
+	} else if err := wipeBadger(); err != nil {
+		h.logger.Error("badger reset failed", "error", err)
+		_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("❌ Gagal mereset BadgerDB (%d halaman Notion sudah diarsipkan).", archivedCount), threadID)
+		return
 	}
+
 	msg := fmt.Sprintf("✅ <b>Reset selesai!</b>\n\n• BadgerDB: seluruh data gamifikasi &amp; cache dihapus\n• Notion: <b>%d</b> halaman jurnal diarsipkan", archivedCount)
 	_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
 }
@@ -1335,7 +1398,7 @@ func (h *Handler) applyTradeUpdate(ctx context.Context, userID int64, oldTrade, 
 		case delta != 0:
 			xpNote = fmt.Sprintf("\n⚡ XP disesuaikan: <b>%+d XP</b> (Total: %d XP — Level %d %s)", delta, prof.TotalXP, prof.Level, prof.Title)
 		}
-		h.evaluatePostTradeRewards(ctx, userID, newTrade, chatID, threadID)
+		h.notifyPostTradeRewards(ctx, h.svc.PostTrade.EvaluateRewards(ctx, userID, newTrade), chatID, threadID)
 	}
 	revengeWarn := h.checkRevengeWarning(ctx, userID, newTrade)
 	msg := fmt.Sprintf("✅ <b>Trade berhasil diperbarui!</b>\n\nSymbol: <b>%s</b> (%s)\nDirection: <b>%s</b>\nStatus: <b>%s</b> (%+.1fR)%s%s",

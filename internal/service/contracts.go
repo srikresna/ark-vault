@@ -39,9 +39,37 @@ type GamificationStore interface {
 	SaveStreak(ctx context.Context, streak *domain.StreakData) error
 	AppendXPEvent(ctx context.Context, event *domain.XPEvent) error
 	GetXPEvents(ctx context.Context, telegramID int64, since time.Time) ([]domain.XPEvent, error)
+	// GetTradeXPGrant returns nil for a trade that has no grant. A grant is the
+	// authoritative record of what a trade contributed: a zero grant means the
+	// trade earned nothing (daily cap, or a record whose commit failed), and a
+	// missing grant means the contribution is unknown (the trade predates grant
+	// tracking). Callers MUST NOT invent a nominal base for a missing grant,
+	// because that would subtract XP the member never received.
 	GetTradeXPGrant(ctx context.Context, telegramID int64, tradeID string) (*domain.TradeXPGrant, error)
 	SaveTradeXPGrant(ctx context.Context, grant *domain.TradeXPGrant) error
 	DeleteTradeXPGrant(ctx context.Context, telegramID int64, tradeID string) error
+
+	// CommitTradeRecord persists every write produced by recording a single
+	// trade as one unit: the updated profile, the streak, the trade's XP grant
+	// and the XP event. Either of the last two may be nil (a trade without an
+	// ID, or no XP granted), and the remaining writes must still commit
+	// together. Without that guarantee a partial failure can leave the profile
+	// ahead of the grant it is later reconciled against, so a trade edit or
+	// delete would claw back XP the member never received. A failed commit
+	// applies nothing at all; the service then records a best-effort zero grant
+	// so the journal-saved trade is known to have earned nothing.
+	CommitTradeRecord(ctx context.Context, profile *domain.GamificationProfile, streak *domain.StreakData, grant *domain.TradeXPGrant, event *domain.XPEvent) error
+
+	// CommitTradeAdjustment persists every write produced by editing or
+	// deleting a single trade as one unit: the updated profile, the XP event,
+	// and the trade's grant mutation. grant is upserted when non-nil and
+	// deleteGrant removes the grant it identifies when non-nil; the two are
+	// mutually exclusive. profile and event are nil when the change has a zero
+	// XP delta (a capped trade that earned nothing), in which case only the
+	// grant mutation is applied. Without that guarantee a partial failure can
+	// leave the profile ahead of its event, or a deleted trade's grant behind
+	// for the next reconciliation to claw back XP the member never received.
+	CommitTradeAdjustment(ctx context.Context, profile *domain.GamificationProfile, event *domain.XPEvent, grant, deleteGrant *domain.TradeXPGrant) error
 }
 
 // BadgeStore provides storage for badge awards.

@@ -46,33 +46,22 @@ func (s *AnalyticsService) GetAnalytics(ctx context.Context, telegramID int64) (
 		return cached, nil
 	}
 	// Calculate basic stats
-	var wins, losses, breakEvens int
+	counts := domain.CountResults(trades)
 	var totalRR float64
 	for _, t := range trades {
-		switch t.Status {
-		case domain.StatusWin:
-			wins++
-		case domain.StatusLoss:
-			losses++
-		case domain.StatusBE:
-			breakEvens++
-		}
 		totalRR += t.ResultRR
 	}
 
 	total := len(trades)
-	winRate := 0.0
-	closed := wins + losses + breakEvens
-	if closed > 0 {
-		winRate = float64(wins) / float64(closed) * 100
-	}
+	winRate := counts.WinRate()
+	closed := counts.Closed()
 	avgRR := 0.0
 	if closed > 0 {
 		avgRR = totalRR / float64(closed)
 	}
 
 	// Build prompt for AI
-	prompt := buildAnalyticsPrompt(trades, total, wins, losses, breakEvens, winRate, totalRR, avgRR)
+	prompt := buildAnalyticsPrompt(trades, total, counts.Wins, counts.Losses, counts.BreakEvens, winRate, totalRR, avgRR)
 
 	// Call AI
 	response, err := s.ai.AnalyzeTrades(ctx, prompt)
@@ -100,8 +89,13 @@ func (s *AnalyticsService) GetAnalytics(ctx context.Context, telegramID int64) (
 
 // hashTrades returns a deterministic SHA-256 fingerprint of a trade slice so
 // any addition, edit, status change, or deletion invalidates cached AI output.
+//
+// The stats formula version is part of the fingerprint so a cached summary
+// produced by an older win-rate definition (which counted OPEN trades or
+// ignored break-evens) is never served to the user.
 func hashTrades(trades []domain.Trade) string {
 	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "stats-formula:v%d\n", domain.StatsFormulaVersion)
 	for _, t := range trades {
 		_, _ = fmt.Fprintf(h, "%s|%d|%s|%s|%s|%.6f|%s|%s|%s\n",
 			t.ID,

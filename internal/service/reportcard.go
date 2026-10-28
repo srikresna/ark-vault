@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"sort"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -63,21 +63,15 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		}
 	}
 
-	// Calculate stats
-	var wins, losses, breakEvens int
+	// Calculate stats. Win rates use the shared domain definition so the report
+	// card matches /stats: wins / (wins+losses+BE), OPEN trades excluded.
+	counts := domain.CountResults(monthTrades)
+	wins, losses, breakEvens := counts.Wins, counts.Losses, counts.BreakEvens
 	var totalRR, bestTrade, worstTrade float64
 	bestInit := false
 	assetMap := make(map[string]*reportAssetAccumulator)
 
 	for _, tr := range monthTrades {
-		switch tr.Status {
-		case domain.StatusWin:
-			wins++
-		case domain.StatusLoss:
-			losses++
-		case domain.StatusBE:
-			breakEvens++
-		}
 		totalRR += tr.ResultRR
 
 		// Best/worst only over decisive results (WIN/LOSS): an OPEN trade's
@@ -109,17 +103,18 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		}
 		acc.total++
 		acc.totalRR += tr.ResultRR
-		if tr.Status == domain.StatusWin {
+		switch tr.Status {
+		case domain.StatusWin:
 			acc.wins++
+		case domain.StatusLoss:
+			acc.losses++
+		case domain.StatusBE:
+			acc.breakEvens++
 		}
 	}
 
 	totalTrades := len(monthTrades)
-	winRate := 0.0
-	closed := wins + losses + breakEvens
-	if closed > 0 {
-		winRate = float64(wins) / float64(closed) * 100
-	}
+	winRate := counts.WinRate()
 
 	// Gamification data (evaluated before cache check so level/XP/badge/streak
 	// updates invalidate a stale report card).
@@ -159,7 +154,6 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 		longestStreak = streak.LongestStreak
 	}
 
-
 	sourceHash := hashReportCardInputs(monthTrades, level, title, xpEarned, badgesEarned, longestStreak)
 	cached, err := s.store.GetReportCard(ctx, telegramID, yearMonth)
 	if err == nil && cached != nil && cached.SourceHash != "" && cached.SourceHash == sourceHash {
@@ -168,14 +162,13 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 	// Build asset breakdown
 	assetBreakdown := make(map[string]domain.AssetStats)
 	for key, acc := range assetMap {
-		wr := 0.0
-		if acc.total > 0 {
-			wr = float64(acc.wins) / float64(acc.total) * 100
-		}
 		assetBreakdown[key] = domain.AssetStats{
-			Total:   acc.total,
-			WinRate: wr,
-			TotalRR: acc.totalRR,
+			Total:      acc.total,
+			Wins:       acc.wins,
+			Losses:     acc.losses,
+			BreakEvens: acc.breakEvens,
+			WinRate:    domain.WinRate(acc.wins, acc.losses, acc.breakEvens),
+			TotalRR:    acc.totalRR,
 		}
 	}
 
@@ -222,9 +215,11 @@ func (s *ReportCardService) GenerateMonthlyReport(ctx context.Context, telegramI
 }
 
 type reportAssetAccumulator struct {
-	total   int
-	wins    int
-	totalRR float64
+	total      int
+	wins       int
+	losses     int
+	breakEvens int
+	totalRR    float64
 }
 
 func (s *ReportCardService) generateAISummary(ctx context.Context, report *domain.MonthlyReportCard) (string, error) {
@@ -256,6 +251,9 @@ func (s *ReportCardService) generateAISummary(ctx context.Context, report *domai
 
 func hashReportCardInputs(trades []domain.Trade, level int, title string, xpEarned, badgesEarned, longestStreak int) string {
 	h := sha256.New()
+	// Stats formula version: a report card cached under an older win-rate
+	// definition must be regenerated, not served.
+	_, _ = fmt.Fprintf(h, "stats-formula:v%d\n", domain.StatsFormulaVersion)
 	_, _ = fmt.Fprintf(h, "gam:%d|%s|%d|%d|%d\n", level, title, xpEarned, badgesEarned, longestStreak)
 	for _, t := range trades {
 		_, _ = fmt.Fprintf(h, "tr:%s|%d|%s|%s|%s|%.6f\n",

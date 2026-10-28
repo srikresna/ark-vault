@@ -81,21 +81,11 @@ func (s *BadgeService) CheckAndAwardBadges(ctx context.Context, memberID int64, 
 		}
 	}
 
-	// 3. Calculate win rate (closed trades only: win + loss + BE).
-	var wins, closedTrades int
-	for _, t := range trades {
-		switch t.Status {
-		case domain.StatusWin:
-			wins++
-			closedTrades++
-		case domain.StatusLoss, domain.StatusBE:
-			closedTrades++
-		}
-	}
-	var winRate float64
-	if closedTrades > 0 {
-		winRate = float64(wins) / float64(closedTrades) * 100
-	}
+	// 3. Calculate win rate over closed trades (WIN+LOSS+BE). OPEN trades never
+	// enter the denominator; the 20-trade gate below still counts closed trades.
+	counts := domain.CountResults(trades)
+	closedTrades := counts.Closed()
+	winRate := counts.WinRate()
 
 	// 4. Calculate monthly RR (current month in WIB).
 	now := time.Now().In(timeutil.WIB)

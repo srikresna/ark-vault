@@ -2,10 +2,10 @@ package badger
 
 import (
 	"context"
-	"testing"
-	"time"
 	"os"
 	"path/filepath"
+	"testing"
+	"time"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
 )
@@ -126,7 +126,8 @@ func TestGamificationRepo(t *testing.T) {
 
 // TestGamificationRepo_TradeXPGrantRoundtripAndPrune covers the per-trade XP
 // grant store used by cap-aware XP reconciliation, and the prune job that
-// keeps the XP log and stale grants from growing without bound.
+// keeps the XP log from growing without bound. Grants are exempt from pruning:
+// an old grant is still needed to reconcile an edit or delete of its trade.
 func TestGamificationRepo_TradeXPGrantRoundtripAndPrune(t *testing.T) {
 	store := newTestStore(t)
 	repo := NewGamificationRepo(store)
@@ -160,7 +161,9 @@ func TestGamificationRepo_TradeXPGrantRoundtripAndPrune(t *testing.T) {
 		t.Fatalf("grant should be deleted, got %+v", g)
 	}
 
-	// Prune: an old event and an old grant disappear; fresh ones survive.
+	// Prune: the stale XP event disappears, but neither grant does — grants
+	// are never pruned by age because a trade can be edited or deleted long
+	// after it was recorded, and reconciliation needs the exact amount granted.
 	now := time.Now()
 	old := &domain.XPEvent{TelegramID: 9, Amount: 10, Reason: "trade_recorded", Timestamp: now.Add(-120 * 24 * time.Hour)}
 	fresh := &domain.XPEvent{TelegramID: 9, Amount: 5, Reason: "trade_recorded", Timestamp: now.Add(-time.Hour)}
@@ -181,18 +184,234 @@ func TestGamificationRepo_TradeXPGrantRoundtripAndPrune(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PruneGamification failed: %v", err)
 	}
-	if deleted != 2 {
-		t.Fatalf("expected 2 pruned keys (1 event + 1 grant), got %d", deleted)
+	if deleted != 1 {
+		t.Fatalf("expected 1 pruned key (the stale event only), got %d", deleted)
 	}
 	events, err := repo.GetXPEvents(ctx, 9, time.Time{})
 	if err != nil || len(events) != 1 || events[0].Amount != 5 {
 		t.Fatalf("expected only the fresh event to survive, got %+v (err %v)", events, err)
 	}
-	if g, _ := repo.GetTradeXPGrant(ctx, 9, "old"); g != nil {
-		t.Fatalf("old grant should be pruned, got %+v", g)
+	if g, _ := repo.GetTradeXPGrant(ctx, 9, "old"); g == nil {
+		t.Fatal("old grant must survive the prune: a pruned grant would make its trade unreconcilable")
 	}
 	if g, _ := repo.GetTradeXPGrant(ctx, 9, "fresh"); g == nil {
 		t.Fatal("fresh grant should survive the prune")
+	}
+}
+
+// TestGamificationRepo_CommitTradeRecord pins that recording a trade writes
+// the profile, streak, grant and XP event through one Badger transaction, and
+// that a commit with nil grant/event leaves the stored grant and XP log alone.
+func TestGamificationRepo_CommitTradeRecord(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewGamificationRepo(store)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	profile := &domain.GamificationProfile{
+		TelegramID: 42,
+		TotalXP:    18,
+		Level:      1,
+		Title:      "Retail",
+		UpdatedAt:  now,
+	}
+	streak := &domain.StreakData{
+		TelegramID:    42,
+		CurrentStreak: 3,
+		LongestStreak: 5,
+		LastLogDate:   "2026-10-28",
+		UpdatedAt:     now,
+	}
+	grant := &domain.TradeXPGrant{
+		TelegramID: 42,
+		TradeID:    "t-atomic",
+		Base:       domain.XPTradeLogged,
+		Screenshot: domain.XPScreenshot,
+		GrantedAt:  now,
+	}
+	event := &domain.XPEvent{
+		TelegramID: 42,
+		Amount:     18,
+		Reason:     "trade_recorded",
+		Timestamp:  now,
+	}
+
+	if err := repo.CommitTradeRecord(ctx, profile, streak, grant, event); err != nil {
+		t.Fatalf("CommitTradeRecord failed: %v", err)
+	}
+
+	gotProfile, err := repo.GetProfile(ctx, 42)
+	if err != nil || gotProfile == nil || gotProfile.TotalXP != 18 {
+		t.Fatalf("profile after commit = (%+v, %v), want TotalXP 18", gotProfile, err)
+	}
+	gotStreak, err := repo.GetStreak(ctx, 42)
+	if err != nil || gotStreak == nil || gotStreak.CurrentStreak != 3 {
+		t.Fatalf("streak after commit = (%+v, %v), want CurrentStreak 3", gotStreak, err)
+	}
+	gotGrant, err := repo.GetTradeXPGrant(ctx, 42, "t-atomic")
+	if err != nil || gotGrant == nil || gotGrant.Base != domain.XPTradeLogged || gotGrant.Screenshot != domain.XPScreenshot {
+		t.Fatalf("grant after commit = (%+v, %v)", gotGrant, err)
+	}
+	events, err := repo.GetXPEvents(ctx, 42, time.Time{})
+	if err != nil || len(events) != 1 || events[0].Amount != 18 {
+		t.Fatalf("xp events after commit = (%+v, %v), want one 18 XP event", events, err)
+	}
+
+	// Profile-only commits (nil streak/grant/event) must not disturb the
+	// already-stored grant or XP log.
+	profile.TotalXP = 25
+	if err := repo.CommitTradeRecord(ctx, profile, nil, nil, nil); err != nil {
+		t.Fatalf("CommitTradeRecord(profile only) failed: %v", err)
+	}
+	gotProfile, err = repo.GetProfile(ctx, 42)
+	if err != nil || gotProfile == nil || gotProfile.TotalXP != 25 {
+		t.Fatalf("profile after profile-only commit = (%+v, %v), want TotalXP 25", gotProfile, err)
+	}
+	if g, _ := repo.GetTradeXPGrant(ctx, 42, "t-atomic"); g == nil || g.Base != domain.XPTradeLogged {
+		t.Fatalf("grant should be untouched by a profile-only commit, got %+v", g)
+	}
+	events, err = repo.GetXPEvents(ctx, 42, time.Time{})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("xp log should be untouched by a profile-only commit, got %+v (err %v)", events, err)
+	}
+}
+
+// TestGamificationRepo_CommitTradeAdjustment pins that editing a trade writes
+// its profile, XP event and replacement grant in one transaction, and that a
+// zero-XP-delta deletion still removes the trade's grant.
+func TestGamificationRepo_CommitTradeAdjustment(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewGamificationRepo(store)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	if err := repo.SaveProfile(ctx, &domain.GamificationProfile{
+		TelegramID: 77, TotalXP: 100, Level: 2, Title: "Chartist", UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveProfile failed: %v", err)
+	}
+	if err := repo.SaveTradeXPGrant(ctx, &domain.TradeXPGrant{
+		TelegramID: 77, TradeID: "t-adj", Base: 20, Screenshot: 3, GrantedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveTradeXPGrant failed: %v", err)
+	}
+
+	// Edit: profile, event and replacement grant commit together.
+	profile := &domain.GamificationProfile{TelegramID: 77, TotalXP: 90, Level: 1, Title: "Retail", UpdatedAt: now}
+	event := &domain.XPEvent{TelegramID: 77, Amount: -10, Reason: "trade_edited", Timestamp: now}
+	grant := &domain.TradeXPGrant{TelegramID: 77, TradeID: "t-adj", Base: 10, Screenshot: 3, GrantedAt: now}
+	if err := repo.CommitTradeAdjustment(ctx, profile, event, grant, nil); err != nil {
+		t.Fatalf("CommitTradeAdjustment(edit) failed: %v", err)
+	}
+
+	gotProfile, err := repo.GetProfile(ctx, 77)
+	if err != nil || gotProfile == nil || gotProfile.TotalXP != 90 || gotProfile.Level != 1 {
+		t.Fatalf("profile after edit = (%+v, %v), want TotalXP 90 Level 1", gotProfile, err)
+	}
+	gotGrant, err := repo.GetTradeXPGrant(ctx, 77, "t-adj")
+	if err != nil || gotGrant == nil || gotGrant.Base != 10 || gotGrant.Screenshot != 3 {
+		t.Fatalf("grant after edit = (%+v, %v), want Base 10 Screenshot 3", gotGrant, err)
+	}
+	events, err := repo.GetXPEvents(ctx, 77, time.Time{})
+	if err != nil || len(events) != 1 || events[0].Amount != -10 || events[0].Reason != "trade_edited" {
+		t.Fatalf("xp events after edit = (%+v, %v), want one -10 trade_edited event", events, err)
+	}
+
+	// A zero grant is a real record ("earned nothing"), not an absent one: the
+	// reconciliation contract depends on telling the two apart, so it must
+	// survive a read as a present grant with zero amounts.
+	if err := repo.CommitTradeAdjustment(ctx, nil, nil, &domain.TradeXPGrant{
+		TelegramID: 77, TradeID: "t-zero", Base: 0, Screenshot: 0, GrantedAt: now,
+	}, nil); err != nil {
+		t.Fatalf("CommitTradeAdjustment(zero grant) failed: %v", err)
+	}
+	zero, err := repo.GetTradeXPGrant(ctx, 77, "t-zero")
+	if err != nil || zero == nil || zero.Base != 0 || zero.Screenshot != 0 {
+		t.Fatalf("zero grant = (%+v, %v), want a present zero grant", zero, err)
+	}
+
+	// Zero-delta delete: only the grant mutation is written, and the grant
+	// still disappears even though no profile or event accompanies it.
+	if err := repo.CommitTradeAdjustment(ctx, nil, nil, nil, &domain.TradeXPGrant{TelegramID: 77, TradeID: "t-adj"}); err != nil {
+		t.Fatalf("CommitTradeAdjustment(zero-delta delete) failed: %v", err)
+	}
+	if g, _ := repo.GetTradeXPGrant(ctx, 77, "t-adj"); g != nil {
+		t.Fatalf("grant must be deleted by a zero-delta adjustment, got %+v", g)
+	}
+	gotProfile, err = repo.GetProfile(ctx, 77)
+	if err != nil || gotProfile == nil || gotProfile.TotalXP != 90 {
+		t.Fatalf("profile after zero-delta delete = (%+v, %v), want TotalXP 90", gotProfile, err)
+	}
+	events, err = repo.GetXPEvents(ctx, 77, time.Time{})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("zero-delta delete must not add an XP event, got %+v (err %v)", events, err)
+	}
+
+	// Deleting a grant that does not exist, or committing nothing at all, is
+	// a no-op rather than an error.
+	if err := repo.CommitTradeAdjustment(ctx, nil, nil, nil, &domain.TradeXPGrant{TelegramID: 77, TradeID: "missing"}); err != nil {
+		t.Fatalf("deleting an absent grant should be a no-op: %v", err)
+	}
+	if err := repo.CommitTradeAdjustment(ctx, nil, nil, nil, nil); err != nil {
+		t.Fatalf("empty adjustment should be a no-op: %v", err)
+	}
+}
+
+// TestGamificationRepo_CommitTradeAdjustmentFailureWritesNothing pins the
+// adapter side of atomicity: when the write transaction cannot commit, none of
+// the profile, XP event or grant changes are applied.
+func TestGamificationRepo_CommitTradeAdjustmentFailureWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("failed to open test badger store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	repo := NewGamificationRepo(store)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := repo.SaveProfile(ctx, &domain.GamificationProfile{
+		TelegramID: 88, TotalXP: 100, Level: 2, Title: "Chartist", UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveProfile failed: %v", err)
+	}
+	if err := repo.SaveTradeXPGrant(ctx, &domain.TradeXPGrant{
+		TelegramID: 88, TradeID: "t-fail", Base: 20, GrantedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveTradeXPGrant failed: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("closing the store failed: %v", err)
+	}
+
+	err = repo.CommitTradeAdjustment(ctx,
+		&domain.GamificationProfile{TelegramID: 88, TotalXP: 80, Level: 1, Title: "Retail", UpdatedAt: now},
+		&domain.XPEvent{TelegramID: 88, Amount: -20, Reason: "trade_deleted", Timestamp: now},
+		nil,
+		&domain.TradeXPGrant{TelegramID: 88, TradeID: "t-fail"},
+	)
+	if err == nil {
+		t.Fatal("expected a commit on a closed store to fail")
+	}
+
+	reopened, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("failed to reopen test badger store: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	repo = NewGamificationRepo(reopened)
+
+	gotProfile, err := repo.GetProfile(ctx, 88)
+	if err != nil || gotProfile == nil || gotProfile.TotalXP != 100 || gotProfile.Level != 2 {
+		t.Fatalf("profile after failed commit = (%+v, %v), want TotalXP 100 Level 2", gotProfile, err)
+	}
+	if g, _ := repo.GetTradeXPGrant(ctx, 88, "t-fail"); g == nil || g.Base != 20 {
+		t.Fatalf("grant after failed commit = %+v, want Base 20", g)
+	}
+	if events, _ := repo.GetXPEvents(ctx, 88, time.Time{}); len(events) != 0 {
+		t.Fatalf("xp events after failed commit = %+v, want none", events)
 	}
 }
 

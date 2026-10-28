@@ -16,7 +16,7 @@ type Stats struct {
 	Losses       int
 	BreakEvens   int
 	OpenTrades   int
-	WinRate      float64 // percentage 0-100
+	WinRate      float64 // percentage 0-100 over closed trades (see WinRate)
 	TotalRR      float64
 	AvgRR        float64
 	Expectancy   float64 // average R per closed trade (Wins+Losses+BE)
@@ -41,22 +41,83 @@ type StatsFilter struct {
 
 // AssetStats is a per-asset-type or per-session breakdown.
 type AssetStats struct {
-	Total   int
-	Wins    int
-	Losses  int
-	TotalRR float64
-	WinRate float64
+	Total      int // every trade in the bucket, OPEN included
+	Wins       int
+	Losses     int
+	BreakEvens int
+	TotalRR    float64
+	WinRate    float64 // wins / (wins+losses+BE); 0 when nothing is closed
 }
 
 // SymbolStats is a per-symbol breakdown.
 type SymbolStats struct {
-	Symbol  string
-	Total   int
-	Wins    int
-	Losses  int
-	TotalRR float64
-	WinRate float64
+	Symbol     string
+	Total      int // every trade for the symbol, OPEN included
+	Wins       int
+	Losses     int
+	BreakEvens int
+	TotalRR    float64
+	WinRate    float64 // wins / (wins+losses+BE); 0 when nothing is closed
 }
+
+// ResultCounts tallies trade outcomes by status.
+type ResultCounts struct {
+	Wins       int
+	Losses     int
+	BreakEvens int
+	Open       int
+}
+
+// CountResults tallies the statuses of trades. Trades with an unknown status
+// are ignored, matching CalculateStats.
+func CountResults(trades []Trade) ResultCounts {
+	var c ResultCounts
+	for _, t := range trades {
+		switch t.Status {
+		case StatusWin:
+			c.Wins++
+		case StatusLoss:
+			c.Losses++
+		case StatusBE:
+			c.BreakEvens++
+		case StatusOpen:
+			c.Open++
+		}
+	}
+	return c
+}
+
+// ClosedTrades returns the number of closed trades: wins + losses + break-evens.
+func ClosedTrades(wins, losses, breakEvens int) int {
+	return wins + losses + breakEvens
+}
+
+// StatsFormulaVersion identifies the current win-rate/statistics definition.
+//
+// It is mixed into every cached artifact derived from trades (AI analytics,
+// monthly report cards) so a formula change invalidates stale output instead of
+// serving numbers computed under the previous definition. Bump it whenever the
+// meaning of a cached statistic changes.
+const StatsFormulaVersion = 2
+
+// WinRate returns the win percentage over closed trades.
+//
+// Every closed trade counts in the denominator — wins, losses, and break-evens
+// alike — while OPEN trades never do. This is the single definition of win rate
+// used by stats, report cards, challenges, goals, badges, leaderboards,
+// analytics, and community reports. It returns 0 when nothing is closed.
+func WinRate(wins, losses, breakEvens int) float64 {
+	if closed := ClosedTrades(wins, losses, breakEvens); closed > 0 {
+		return float64(wins) / float64(closed) * 100
+	}
+	return 0
+}
+
+// Closed returns the number of closed trades (WIN+LOSS+BE).
+func (c ResultCounts) Closed() int { return ClosedTrades(c.Wins, c.Losses, c.BreakEvens) }
+
+// WinRate returns the counts' win percentage over their closed trades.
+func (c ResultCounts) WinRate() float64 { return WinRate(c.Wins, c.Losses, c.BreakEvens) }
 
 // CalculateStats computes statistics from a slice of trades.
 func CalculateStats(trades []Trade) Stats {
@@ -105,6 +166,7 @@ func CalculateStats(trades []Trade) Stats {
 			}
 		case StatusBE:
 			s.BreakEvens++
+			as.BreakEvens++
 			curStreak = 0
 		case StatusOpen:
 			s.OpenTrades++
@@ -132,10 +194,8 @@ func CalculateStats(trades []Trade) Stats {
 			}
 		}
 
-		// Update per-asset win rate
-		if closed := as.Wins + as.Losses; closed > 0 {
-			as.WinRate = float64(as.Wins) / float64(closed) * 100
-		}
+		// Update per-asset win rate over closed trades (OPEN excluded).
+		as.WinRate = WinRate(as.Wins, as.Losses, as.BreakEvens)
 		s.ByAsset[t.AssetType] = as
 
 		// Per-session accumulator
@@ -149,10 +209,10 @@ func CalculateStats(trades []Trade) Stats {
 			case StatusLoss:
 				ss.Losses++
 				ss.TotalRR += t.ResultRR
+			case StatusBE:
+				ss.BreakEvens++
 			}
-			if closed := ss.Wins + ss.Losses; closed > 0 {
-				ss.WinRate = float64(ss.Wins) / float64(closed) * 100
-			}
+			ss.WinRate = WinRate(ss.Wins, ss.Losses, ss.BreakEvens)
 			s.BySession[t.TimeWindow] = ss
 		}
 
@@ -171,22 +231,18 @@ func CalculateStats(trades []Trade) Stats {
 			case StatusLoss:
 				sym.Losses++
 				sym.TotalRR += t.ResultRR
+			case StatusBE:
+				sym.BreakEvens++
 			}
-			if closed := sym.Wins + sym.Losses; closed > 0 {
-				sym.WinRate = float64(sym.Wins) / float64(closed) * 100
-			}
+			sym.WinRate = WinRate(sym.Wins, sym.Losses, sym.BreakEvens)
 		}
 	}
 
-	closed := s.Wins + s.Losses
-	if closed > 0 {
-		s.WinRate = float64(s.Wins) / float64(closed) * 100
-	}
+	s.WinRate = WinRate(s.Wins, s.Losses, s.BreakEvens)
 	if rrCount > 0 {
 		s.AvgRR = rrSum / float64(rrCount)
 	}
-	totalClosedWithBE := s.Wins + s.Losses + s.BreakEvens
-	if totalClosedWithBE > 0 {
+	if totalClosedWithBE := ClosedTrades(s.Wins, s.Losses, s.BreakEvens); totalClosedWithBE > 0 {
 		s.Expectancy = s.TotalRR / float64(totalClosedWithBE)
 	}
 	if grossLoss > 0 {

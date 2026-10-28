@@ -156,7 +156,8 @@ func TestChallengeService_HighestWRCountsClosedTradesOnly(t *testing.T) {
 	now := time.Now().In(timeutil.WIB)
 
 	// alice: 2W + 2OPEN -> only 2 closed trades, below the min-3 gate.
-	// bob: 2W + 1L + 2OPEN -> 3 closed, WR = 66.7% (not 40%).
+	// bob: 2W + 1L + 1BE + 2OPEN -> 4 closed, WR = 50% (break-even dilutes,
+	// OPEN excluded; 2/5 = 40% would be the old OPEN-inclusive mistake).
 	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 1, Username: "alice"})
 	_, _ = membersRepo.EnsureMember(ctx, &domain.Member{TelegramID: 2, Username: "bob"})
 	tradesRepo.trades[1] = []domain.Trade{
@@ -169,6 +170,7 @@ func TestChallengeService_HighestWRCountsClosedTradesOnly(t *testing.T) {
 		{Date: now, Status: domain.StatusWin, ResultRR: 1},
 		{Date: now, Status: domain.StatusWin, ResultRR: 1},
 		{Date: now, Status: domain.StatusLoss, ResultRR: -1},
+		{Date: now, Status: domain.StatusBE},
 		{Date: now, Status: domain.StatusOpen},
 		{Date: now, Status: domain.StatusOpen},
 	}
@@ -184,10 +186,10 @@ func TestChallengeService_HighestWRCountsClosedTradesOnly(t *testing.T) {
 		t.Fatalf("GetCurrentStandings failed: %v", err)
 	}
 	if len(standings) != 1 || standings[0].TelegramID != 2 {
-		t.Fatalf("expected only bob (3 closed trades) in standings, got %+v", standings)
+		t.Fatalf("expected only bob (4 closed trades) in standings, got %+v", standings)
 	}
-	if math.Abs(standings[0].Value-200.0/3.0) > 1e-9 {
-		t.Fatalf("bob WR = %.2f%%, want 66.67%% (2 wins over 3 closed, OPEN excluded)", standings[0].Value)
+	if math.Abs(standings[0].Value-50.0) > 1e-9 {
+		t.Fatalf("bob WR = %.2f%%, want 50.00%% (2 wins over 4 closed; BE dilutes, OPEN excluded)", standings[0].Value)
 	}
 }
 
@@ -237,9 +239,9 @@ func TestChallengeService_BestRRIgnoresOpenTrades(t *testing.T) {
 }
 
 // TestChallengeService_FinalizeIsIdempotentAndWIBNormalised verifies that:
-// 1. GetOrCreateChallenge normalises a UTC timestamp to WIB before deriving the week;
-// 2. FinalizeChallenge persists Finalized=true before awarding XP and never double-awards
-//    when invoked concurrently.
+//  1. GetOrCreateChallenge normalises a UTC timestamp to WIB before deriving the week;
+//  2. FinalizeChallenge persists Finalized=true before awarding XP and never double-awards
+//     when invoked concurrently.
 func TestChallengeService_FinalizeIsIdempotentAndWIBNormalised(t *testing.T) {
 	store := newMockChallengeStore()
 	tradesRepo := newMockGamificationTradeRepo()

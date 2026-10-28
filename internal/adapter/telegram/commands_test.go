@@ -282,6 +282,12 @@ func (stubGamStore) GetTradeXPGrant(context.Context, int64, string) (*domain.Tra
 }
 func (stubGamStore) SaveTradeXPGrant(context.Context, *domain.TradeXPGrant) error { return nil }
 func (stubGamStore) DeleteTradeXPGrant(context.Context, int64, string) error      { return nil }
+func (stubGamStore) CommitTradeRecord(context.Context, *domain.GamificationProfile, *domain.StreakData, *domain.TradeXPGrant, *domain.XPEvent) error {
+	return nil
+}
+func (stubGamStore) CommitTradeAdjustment(context.Context, *domain.GamificationProfile, *domain.XPEvent, *domain.TradeXPGrant, *domain.TradeXPGrant) error {
+	return nil
+}
 
 type stubBadgeStore struct{}
 

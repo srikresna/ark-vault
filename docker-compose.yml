@@ -13,6 +13,16 @@ services:
       dockerfile: Dockerfile
     container_name: ark-vault-bot
     restart: unless-stopped
+    # Start's shutdown budget (20s hard deadline + 3s confirmation in
+    # internal/adapter/telegram/bot.go) leaves the rest of this grace for
+    # handler cleanup and BadgerDB's compact-on-close. Accepted updates are
+    # allowed to finish before the deadline because Telegram's offset is a
+    # watermark: cancelling one update forces every later one in the batch to
+    # be redelivered. The final confirmation makes a completed batch survive
+    # the restart. If a handler ignores cancellation, Start keeps waiting
+    # rather than letting main close the store underneath it; Docker SIGKILLs
+    # the process when this grace expires.
+    stop_grace_period: 30s
     env_file:
       - .env
     environment:

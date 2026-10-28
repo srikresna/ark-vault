@@ -38,7 +38,17 @@ func NewTradeRepo(client *Client, memberRepo *MemberRepo, caches ...TradeCacheSt
 }
 
 // SaveTrade creates a new trade entry in the member's inline database and invalidates their trade cache.
+//
+// The journaling gate keeps the write from racing /reset: a trade recorded while
+// journals are being archived would otherwise land in a page that is about to
+// disappear. It fails fast with ErrResetInProgress instead.
 func (r *TradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain.Trade) error {
+	release, err := r.memberRepo.beginJournaling()
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	member, err := r.memberRepo.GetMember(ctx, memberID)
 	if err != nil {
 		return fmt.Errorf("get member: %w", err)
@@ -57,6 +67,16 @@ func (r *TradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain
 
 	raw, err := r.client.CreatePage(ctx, payload)
 	if err != nil {
+		if IsAmbiguousWriteError(err) {
+			// The trade may exist in Notion even though the response was lost.
+			// Drop the cached history so the next read reflects Notion instead
+			// of serving a list that cannot contain it, and tell the user to
+			// check /history rather than retry (a retry would duplicate it).
+			if r.cacheStore != nil {
+				_ = r.cacheStore.InvalidateCachedTrades(ctx, memberID)
+			}
+			return fmt.Errorf("create trade page (may have been saved, check /history before retrying): %w", err)
+		}
 		return fmt.Errorf("create trade page: %w", err)
 	}
 
@@ -64,7 +84,18 @@ func (r *TradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
+		// The page was created; only its ID is unknown. That is an ambiguous
+		// write: the trade exists, so the caller must not be told to retry.
+		if r.cacheStore != nil {
+			_ = r.cacheStore.InvalidateCachedTrades(ctx, memberID)
+		}
+		return AmbiguousWriteError(fmt.Errorf("parse create response: %w", err))
+	}
+	if resp.ID == "" {
+		if r.cacheStore != nil {
+			_ = r.cacheStore.InvalidateCachedTrades(ctx, memberID)
+		}
+		return AmbiguousWriteError(fmt.Errorf("parse create response: empty page id"))
 	}
 	trade.ID = resp.ID
 
@@ -77,7 +108,9 @@ func (r *TradeRepo) SaveTrade(ctx context.Context, memberID int64, trade *domain
 // GetTrades retrieves all trades for a member from cache or their Notion inline database.
 func (r *TradeRepo) GetTrades(ctx context.Context, memberID int64) ([]domain.Trade, error) {
 	if r.cacheStore != nil {
-		if cached, hit, err := r.cacheStore.GetCachedTrades(ctx, memberID); err == nil && hit {
+		// A nil cached value is not a valid history (and would otherwise be
+		// returned as a silent "no trades"); fall through to Notion.
+		if cached, hit, err := r.cacheStore.GetCachedTrades(ctx, memberID); err == nil && hit && cached != nil {
 			return cached, nil
 		}
 	}
@@ -87,7 +120,10 @@ func (r *TradeRepo) GetTrades(ctx context.Context, memberID int64) ([]domain.Tra
 		return nil, fmt.Errorf("get member: %w", err)
 	}
 	if member.NotionDBID == "" {
-		return nil, nil
+		// GetMember repairs a journal whose database was never created, so an
+		// empty ID here means the repair failed. Returning an empty list would
+		// silently report "no trades" to /stats, /report and the leaderboard.
+		return nil, fmt.Errorf("member %d has no trade database", memberID)
 	}
 
 	payload := map[string]interface{}{
@@ -116,6 +152,12 @@ func (r *TradeRepo) UpdateTrade(ctx context.Context, memberID int64, trade *doma
 	if trade == nil || trade.ID == "" {
 		return fmt.Errorf("trade ID is required for update")
 	}
+	release, err := r.memberRepo.beginJournaling()
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	trade.AutoDetectAsset()
 	// forUpdate=true emits clear-values for optional properties so an edit can
 	// actually empty Time Window/Confluence/Notes instead of leaving the old
@@ -138,6 +180,12 @@ func (r *TradeRepo) DeleteTrade(ctx context.Context, memberID int64, tradeID str
 	if tradeID == "" {
 		return fmt.Errorf("trade ID is required for delete")
 	}
+	release, err := r.memberRepo.beginJournaling()
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	payload := map[string]interface{}{
 		"archived": true,
 	}
@@ -219,12 +267,16 @@ func (r *TradeRepo) buildTradeProperties(t *domain.Trade, forUpdate bool) map[st
 }
 
 // parseTrades extracts trades from Notion database query results.
+//
+// A malformed row fails the whole read. Silently skipping it would return (and
+// cache) a truncated history, so /stats, /report and the leaderboard would
+// under-count trades with no error anywhere.
 func (r *TradeRepo) parseTrades(items []json.RawMessage) ([]domain.Trade, error) {
 	trades := make([]domain.Trade, 0, len(items))
-	for _, item := range items {
+	for i, item := range items {
 		t, err := r.parseSingleTrade(item)
 		if err != nil {
-			continue // skip malformed entries
+			return nil, fmt.Errorf("parse trade %d: %w", i, err)
 		}
 		trades = append(trades, *t)
 	}

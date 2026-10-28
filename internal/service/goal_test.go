@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -40,8 +41,9 @@ func (m *mockGoalStore) ListActiveGoals(_ context.Context, yearMonth string) ([]
 }
 
 // TestGoalService_WinRateGoalExcludesOpenTrades pins the invariant that the
-// win-rate goal denominator counts closed trades only, consistent with
-// /stats: 2 wins + 2 OPEN trades is 100%, not 50%.
+// win-rate goal denominator counts closed trades only, consistent with /stats:
+// 2 wins + 1 BE + 2 OPEN trades is 66.7% — the OPEN trades are excluded and
+// the break-even dilutes the rate.
 func TestGoalService_WinRateGoalExcludesOpenTrades(t *testing.T) {
 	store := newMockGoalStore()
 	tradesRepo := newMockGamificationTradeRepo()
@@ -65,6 +67,7 @@ func TestGoalService_WinRateGoalExcludesOpenTrades(t *testing.T) {
 	tradesRepo.trades[uid] = []domain.Trade{
 		{Date: time.Now().In(timeutil.WIB), Status: domain.StatusWin, ResultRR: 1},
 		{Date: time.Now().In(timeutil.WIB), Status: domain.StatusWin, ResultRR: 1},
+		{Date: time.Now().In(timeutil.WIB), Status: domain.StatusBE},
 		{Date: time.Now().In(timeutil.WIB), Status: domain.StatusOpen},
 		{Date: time.Now().In(timeutil.WIB), Status: domain.StatusOpen},
 	}
@@ -76,11 +79,11 @@ func TestGoalService_WinRateGoalExcludesOpenTrades(t *testing.T) {
 	if progress == nil {
 		t.Fatal("expected progress for the current month's goal")
 	}
-	if progress.CurrentValue != 100 {
-		t.Fatalf("win-rate goal current value = %.1f%%, want 100%% over 2 closed trades", progress.CurrentValue)
+	if want := 200.0 / 3.0; math.Abs(progress.CurrentValue-want) > 1e-9 {
+		t.Fatalf("win-rate goal current value = %.2f%%, want %.2f%% over 2W/1BE closed trades", progress.CurrentValue, want)
 	}
 
-	// 2W/2L closed (50%) against an 80% target: progress 62.5%, not achieved.
+	// 2W/2L/1BE closed (40%) against an 80% target: progress 50%, not achieved.
 	tradesRepo.trades[uid] = append(tradesRepo.trades[uid],
 		domain.Trade{Date: time.Now().In(timeutil.WIB), Status: domain.StatusLoss, ResultRR: -1},
 		domain.Trade{Date: time.Now().In(timeutil.WIB), Status: domain.StatusLoss, ResultRR: -1},
@@ -89,7 +92,7 @@ func TestGoalService_WinRateGoalExcludesOpenTrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProgress failed: %v", err)
 	}
-	if progress.CurrentValue != 50 {
-		t.Fatalf("win-rate goal current value = %.1f%%, want 50%% over 4 closed trades", progress.CurrentValue)
+	if progress.CurrentValue != 40 {
+		t.Fatalf("win-rate goal current value = %.1f%%, want 40%% over 5 closed trades", progress.CurrentValue)
 	}
 }

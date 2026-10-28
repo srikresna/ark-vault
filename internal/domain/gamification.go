@@ -32,7 +32,9 @@ type XPEvent struct {
 // single trade, so a later edit or delete can reconcile exactly what was
 // awarded. This matters because the daily trade-XP cap may have granted
 // nothing at record time; subtracting the full base XP then would claw back
-// XP the member never received.
+// XP the member never received. Grants are never pruned by age: a trade can be
+// edited or deleted at any later point, so a grant lives until its trade is
+// deleted.
 type TradeXPGrant struct {
 	TelegramID int64     `json:"telegram_id"`
 	TradeID    string    `json:"trade_id"`

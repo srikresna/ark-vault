@@ -7,6 +7,7 @@ import (
 
 	"github.com/arkcode369/ark-vault/pkg/timeutil"
 )
+
 func TestCalculateStats(t *testing.T) {
 	trades := []Trade{
 		{Status: StatusWin, ResultRR: 2.0, AssetType: AssetForex},
@@ -35,9 +36,22 @@ func TestCalculateStats(t *testing.T) {
 		t.Errorf("open: got %d, want 1", s.OpenTrades)
 	}
 
-	// Win rate: 3 wins / (3+1) closed = 75%
-	if s.WinRate != 75.0 {
-		t.Errorf("win rate: got %.1f, want 75.0", s.WinRate)
+	// Win rate: 3 wins / (3W + 1L + 1BE) closed = 60%. The OPEN trade is
+	// excluded from the denominator.
+	if math.Abs(s.WinRate-60.0) > 1e-9 {
+		t.Errorf("win rate: got %.2f, want 60.0", s.WinRate)
+	}
+
+	// Per-asset win rates follow the same rule: break-evens dilute the rate and
+	// OPEN trades never enter the denominator.
+	if fx := s.ByAsset[AssetForex]; fx.BreakEvens != 1 || math.Abs(fx.WinRate-200.0/3.0) > 1e-9 {
+		t.Errorf("ByAsset[Forex] = %+v, want 2W/1BE and 66.67%% WR", fx)
+	}
+	if gold := s.ByAsset[AssetGold]; math.Abs(gold.WinRate-50.0) > 1e-9 {
+		t.Errorf("ByAsset[Gold] = %+v, want 50%% WR over 1W/1L", gold)
+	}
+	if crypto := s.ByAsset[AssetCrypto]; crypto.Total != 1 || crypto.WinRate != 0 {
+		t.Errorf("ByAsset[Crypto] = %+v, want 1 open trade and 0%% WR", crypto)
 	}
 
 	// Total RR: 2.0+1.5-1.0+3.0 = 5.5
@@ -50,6 +64,53 @@ func TestCalculateStats(t *testing.T) {
 	}
 	if s.WorstRR != -1.0 {
 		t.Errorf("worst: got %.1f, want -1.0", s.WorstRR)
+	}
+}
+
+// TestWinRate pins the single domain definition of win rate:
+// wins / (wins+losses+BE), with OPEN trades never counted.
+func TestWinRate(t *testing.T) {
+	tests := []struct {
+		name             string
+		wins, losses, be int
+		want             float64
+	}{
+		{"no closed trades", 0, 0, 0, 0},
+		{"only open trades", 0, 0, 0, 0},
+		{"all wins", 2, 0, 0, 100},
+		{"break-evens dilute", 3, 1, 1, 60},
+		{"losses dilute", 2, 2, 0, 50},
+		{"only break-evens", 0, 0, 4, 0},
+	}
+	for _, tt := range tests {
+		if got := WinRate(tt.wins, tt.losses, tt.be); math.Abs(got-tt.want) > 1e-9 {
+			t.Errorf("%s: WinRate(%d,%d,%d) = %.2f, want %.2f", tt.name, tt.wins, tt.losses, tt.be, got, tt.want)
+		}
+	}
+
+	if got := ClosedTrades(3, 1, 1); got != 5 {
+		t.Errorf("ClosedTrades(3,1,1) = %d, want 5", got)
+	}
+}
+
+// TestCountResults pins the tally helper every win-rate consumer relies on.
+func TestCountResults(t *testing.T) {
+	c := CountResults([]Trade{
+		{Status: StatusWin},
+		{Status: StatusWin},
+		{Status: StatusLoss},
+		{Status: StatusBE},
+		{Status: StatusOpen},
+		{Status: ""},
+	})
+	if c.Wins != 2 || c.Losses != 1 || c.BreakEvens != 1 || c.Open != 1 {
+		t.Fatalf("CountResults = %+v, want 2W/1L/1BE/1OPEN", c)
+	}
+	if got := c.Closed(); got != 4 {
+		t.Errorf("Closed() = %d, want 4", got)
+	}
+	if got := c.WinRate(); math.Abs(got-50.0) > 1e-9 {
+		t.Errorf("WinRate() = %.2f, want 50.00", got)
 	}
 }
 
@@ -127,9 +188,9 @@ func TestDetectAssetType(t *testing.T) {
 
 func TestParseAssetType(t *testing.T) {
 	tests := []struct {
-		input   string
-		want    AssetType
-		wantOk  bool
+		input  string
+		want   AssetType
+		wantOk bool
 	}{
 		{"forex", AssetForex, true},
 		{"FX", AssetForex, true},
@@ -178,8 +239,19 @@ func TestCalculateStats_SessionSymbolsExpectancyProfitFactor(t *testing.T) {
 		t.Errorf("BySession[London] = %+v, want 2 trades, +5.0R, 100%% WR", london)
 	}
 
+	// A session with only a break-even has no wins and must report 0% WR, not
+	// be dropped from the denominator.
+	nyam, ok := s.BySession[SessionNYAM]
+	if !ok || nyam.BreakEvens != 1 || nyam.WinRate != 0 {
+		t.Errorf("BySession[NYAM] = %+v, want 1 BE trade and 0%% WR", nyam)
+	}
+
 	if len(s.TopSymbols) == 0 || s.TopSymbols[0].Symbol != "XAUUSD" || s.TopSymbols[0].Total != 3 {
 		t.Errorf("TopSymbols = %+v, want XAUUSD first with 3 trades", s.TopSymbols)
+	}
+	// XAUUSD: 2W + 1BE -> 66.67% WR (break-even dilutes the rate).
+	if xau := s.TopSymbols[0]; xau.BreakEvens != 1 || math.Abs(xau.WinRate-200.0/3.0) > 1e-9 {
+		t.Errorf("TopSymbols[XAUUSD] = %+v, want 2W/1BE and 66.67%% WR", xau)
 	}
 }
 
@@ -191,8 +263,8 @@ func TestFilterTradesByPeriodAndConsecutiveLossesToday(t *testing.T) {
 		{ID: "1", Date: now, Status: StatusLoss, ResultRR: -1},
 		{ID: "2", Date: now.Add(-1 * time.Hour), Status: StatusLoss, ResultRR: -1},
 		{ID: "3", Date: now.Add(-2 * time.Hour), Status: StatusLoss, ResultRR: -1},
-		{ID: "4", Date: now.AddDate(0, 0, -3), Status: StatusWin, ResultRR: 2},   // Earlier this week/month
-		{ID: "5", Date: now.AddDate(0, -1, 0), Status: StatusWin, ResultRR: 3},   // Last month
+		{ID: "4", Date: now.AddDate(0, 0, -3), Status: StatusWin, ResultRR: 2}, // Earlier this week/month
+		{ID: "5", Date: now.AddDate(0, -1, 0), Status: StatusWin, ResultRR: 3}, // Last month
 	}
 
 	if got := ConsecutiveLossesToday(trades, now); got != 3 {

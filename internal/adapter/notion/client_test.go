@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -133,7 +134,8 @@ func TestClient_RetriesOn429WithRetryAfter(t *testing.T) {
 	}
 }
 
-// TestClient_RetriesOn5xx covers transient Notion server errors.
+// TestClient_RetriesOn5xx covers transient Notion server errors on idempotent
+// requests, where a repeat cannot duplicate anything.
 func TestClient_RetriesOn5xx(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,11 +148,81 @@ func TestClient_RetriesOn5xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newTestClient(t, srv).CreatePage(context.Background(), map[string]interface{}{"x": 1}); err != nil {
+	if _, err := newTestClient(t, srv).GetPage(context.Background(), "page-1"); err != nil {
 		t.Fatalf("expected success after retries, got %v", err)
 	}
 	if got := atomic.LoadInt32(&calls); got != 3 {
 		t.Fatalf("expected 3 attempts, got %d", got)
+	}
+}
+
+// TestClient_CreateDoesNotRetryAmbiguousFailure pins the duplicate-creation
+// guard: a 5xx from a create may arrive after Notion committed the object, so
+// retrying would create a second one. The failure must surface as ambiguous so
+// the caller can reconcile.
+func TestClient_CreateDoesNotRetryAmbiguousFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"server error", http.StatusInternalServerError},
+		{"bad gateway", http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&calls, 1)
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			client := newTestClient(t, srv)
+			_, err := client.CreateDatabase(context.Background(), map[string]interface{}{"x": 1})
+			if err == nil {
+				t.Fatalf("expected an error for status %d", tc.status)
+			}
+			if !IsAmbiguousWriteError(err) {
+				t.Errorf("error %v must be reported as ambiguous", err)
+			}
+			if got := atomic.LoadInt32(&calls); got != 1 {
+				t.Fatalf("create must not be retried after status %d, got %d attempts", tc.status, got)
+			}
+
+			// The same failure on a read is still retried.
+			atomic.StoreInt32(&calls, 0)
+			if _, err := client.GetPage(context.Background(), "page-1"); err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := atomic.LoadInt32(&calls); got != maxAttempts {
+				t.Errorf("read attempts = %d, want %d", got, maxAttempts)
+			}
+		})
+	}
+}
+
+// TestClient_CreateRetriesOn429 pins that a rate-limited create is retried:
+// 429 means the request was rejected and never applied.
+func TestClient_CreateRetriesOn429(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"db-1"}`))
+	}))
+	defer srv.Close()
+
+	raw, err := newTestClient(t, srv).CreateDatabase(context.Background(), map[string]interface{}{"x": 1})
+	if err != nil {
+		t.Fatalf("expected success after 429 retry, got %v", err)
+	}
+	if !strings.Contains(string(raw), "db-1") {
+		t.Fatalf("unexpected response: %s", raw)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 attempts, got %d", got)
 	}
 }
 
@@ -186,7 +258,7 @@ func TestClient_GivesUpAfterMaxAttempts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newTestClient(t, srv).CreatePage(context.Background(), map[string]interface{}{"x": 1}); err == nil {
+	if _, err := newTestClient(t, srv).GetPage(context.Background(), "page-1"); err == nil {
 		t.Fatal("expected error after exhausting attempts")
 	}
 	if got := atomic.LoadInt32(&calls); got != maxAttempts {
@@ -211,7 +283,7 @@ func TestClient_RetryRebuildsRequestBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newTestClient(t, srv).CreatePage(context.Background(), map[string]interface{}{"marker": "payload"}); err != nil {
+	if _, err := newTestClient(t, srv).QueryDatabase(context.Background(), "db-1", map[string]interface{}{"marker": "payload"}); err != nil {
 		t.Fatalf("expected success after retry, got %v", err)
 	}
 	if len(bodies) != 2 {
@@ -243,7 +315,7 @@ func TestClient_ContextCancelStopsRetry(t *testing.T) {
 		cancel()
 	}()
 
-	if _, err := client.CreatePage(ctx, map[string]interface{}{"x": 1}); err == nil {
+	if _, err := client.GetPage(ctx, "page-1"); err == nil {
 		t.Fatal("expected error on cancelled context")
 	}
 	if got := atomic.LoadInt32(&calls); got > 2 {
@@ -287,5 +359,76 @@ func TestTradeRepo_GetTradesPaginatesAllRows(t *testing.T) {
 	}
 	if len(trades) != 2 {
 		t.Fatalf("expected trades from both pages, got %d", len(trades))
+	}
+}
+
+// TestClient_CancelledCreateIsAmbiguous pins that a cancelled create is not
+// reported as a clean failure: the request may have reached Notion before the
+// context was cancelled, so callers must reconcile instead of retrying.
+func TestClient_CancelledCreateIsAmbiguous(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		// Hold the request until the client gives up (or the test ends).
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	client := newTestClient(t, srv)
+	client.retryBase = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	_, err := client.CreateDatabase(ctx, map[string]interface{}{"x": 1})
+	if err == nil {
+		t.Fatal("expected the cancelled create to fail")
+	}
+	if !IsAmbiguousWriteError(err) {
+		t.Errorf("cancelled create error %v must be reported as ambiguous", err)
+	}
+}
+
+// TestClient_CancelledReadIsNotAmbiguous pins that the same cancellation on an
+// idempotent read is not flagged as a possible write, so the caller can simply
+// retry it.
+func TestClient_CancelledReadIsNotAmbiguous(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	client := newTestClient(t, srv)
+	client.retryBase = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	if _, err := client.GetPage(ctx, "page-1"); err == nil {
+		t.Fatal("expected the cancelled read to fail")
+	} else if IsAmbiguousWriteError(err) {
+		t.Errorf("cancelled read error %v must not be reported as an ambiguous write", err)
 	}
 }

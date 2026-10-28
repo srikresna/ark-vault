@@ -65,26 +65,61 @@ func NewClient(token string) *Client {
 // do executes an HTTP request against the Notion API, retrying transient
 // failures.
 func (c *Client) do(ctx context.Context, method, path string, body interface{}) (json.RawMessage, error) {
-	var payload []byte
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal body: %w", err)
-		}
-		payload = b
+	payload, contentType, err := encodeBody(body)
+	if err != nil {
+		return nil, err
 	}
-	contentType := ""
-	if body != nil {
-		contentType = "application/json"
-	}
-	return c.doWithRetry(ctx, method, path, payload, contentType)
+	return c.doWithPolicy(ctx, method, path, payload, contentType, retryTransient)
 }
+
+// doCreate performs a non-idempotent create.
+//
+// Unlike do it retries only 429 responses, which Notion returns without applying
+// the request. A network failure, a 5xx, or an unreadable response leaves it
+// unknown whether the object was created, and retrying then creates a second
+// one: two inline databases split a member's trade history, and two member
+// pages orphan one of them. The failure is reported as ambiguous so callers can
+// reconcile by reading Notion instead of blindly retrying.
+func (c *Client) doCreate(ctx context.Context, path string, body interface{}) (json.RawMessage, error) {
+	payload, contentType, err := encodeBody(body)
+	if err != nil {
+		return nil, err
+	}
+	return c.doWithPolicy(ctx, http.MethodPost, path, payload, contentType, retryRateLimitOnly)
+}
+
+func encodeBody(body interface{}) ([]byte, string, error) {
+	if body == nil {
+		return nil, "", nil
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal body: %w", err)
+	}
+	return payload, "application/json", nil
+}
+
+// retryPolicy says which failures a request may be retried after.
+type retryPolicy int
+
+const (
+	// retryTransient applies to idempotent requests: 429, 5xx and network
+	// failures are all safe to repeat.
+	retryTransient retryPolicy = iota
+	// retryRateLimitOnly applies to non-idempotent creates: only 429 is
+	// guaranteed not to have applied the request.
+	retryRateLimitOnly
+)
 
 // doWithRetry performs the request, retrying on 429, 5xx and network errors.
 //
 // body is passed as bytes rather than an io.Reader because a reader is consumed
 // by the first attempt; rebuilding it from bytes is what makes retries possible.
 func (c *Client) doWithRetry(ctx context.Context, method, path string, body []byte, contentType string) (json.RawMessage, error) {
+	return c.doWithPolicy(ctx, method, path, body, contentType, retryTransient)
+}
+
+func (c *Client) doWithPolicy(ctx context.Context, method, path string, body []byte, contentType string, policy retryPolicy) (json.RawMessage, error) {
 	var lastErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -94,22 +129,49 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body []by
 			}
 		}
 
-		raw, retryable, err := c.attempt(ctx, method, path, body, contentType)
-		if err == nil {
+		raw, kind, err := c.attempt(ctx, method, path, body, contentType)
+		switch kind {
+		case attemptOK:
 			return raw, nil
-		}
-		lastErr = err
-		if !retryable {
+		case attemptRetryRateLimit:
+			// 429: the request was rejected, never applied, safe for any
+			// request including creates.
+		case attemptAmbiguous:
+			// A create may have been applied, so it is never retried; a
+			// cancelled request is not retried either because the outcome is
+			// already unknown and the caller is shutting down.
+			if policy == retryRateLimitOnly {
+				return nil, &ambiguousWriteError{err: err}
+			}
+			if ctx.Err() != nil {
+				return nil, err
+			}
+		case attemptFatal:
 			return nil, err
 		}
+
+		lastErr = err
 	}
 
 	return nil, fmt.Errorf("notion request failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
-// attempt performs a single HTTP request. It reports whether the failure is
-// worth retrying.
-func (c *Client) attempt(ctx context.Context, method, path string, body []byte, contentType string) (json.RawMessage, bool, error) {
+// attemptResult classifies a single failed request.
+type attemptResult int
+
+const (
+	attemptOK attemptResult = iota
+	// attemptRetryRateLimit: 429; the request was never applied.
+	attemptRetryRateLimit
+	// attemptAmbiguous: the request may have been applied (network failure,
+	// unreadable response, 5xx).
+	attemptAmbiguous
+	// attemptFatal: the request was rejected (4xx) and was not applied.
+	attemptFatal
+)
+
+// attempt performs a single HTTP request and classifies any failure.
+func (c *Client) attempt(ctx context.Context, method, path string, body []byte, contentType string) (json.RawMessage, attemptResult, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -117,7 +179,7 @@ func (c *Client) attempt(ctx context.Context, method, path string, body []byte, 
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
 	if err != nil {
-		return nil, false, fmt.Errorf("create request: %w", err)
+		return nil, attemptFatal, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Notion-Version", notionVersion)
@@ -127,31 +189,102 @@ func (c *Client) attempt(ctx context.Context, method, path string, body []byte, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// A cancelled context is terminal, not transient.
-		if ctx.Err() != nil {
-			return nil, false, fmt.Errorf("http request: %w", err)
-		}
-		return nil, true, fmt.Errorf("http request: %w", err)
+		// A transport failure (including cancellation) does not prove the
+		// request was not applied: the write may have reached Notion before
+		// the connection broke. Callers decide what an unknown outcome means;
+		// retries are gated by the policy in doWithPolicy.
+		return nil, attemptAmbiguous, fmt.Errorf("http request: %w", err)
 	}
 
 	respBody, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if readErr != nil {
-		return nil, true, fmt.Errorf("read response: %w", readErr)
+		// The server answered but the body was lost; a write may have landed.
+		return nil, attemptAmbiguous, fmt.Errorf("read response: %w", readErr)
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return json.RawMessage(respBody), false, nil
+		return json.RawMessage(respBody), attemptOK, nil
 	}
 
-	apiErr := fmt.Errorf("notion API error (status %d): %s", resp.StatusCode, string(respBody))
+	apiErr := &APIError{Status: resp.StatusCode, Body: string(respBody)}
+	var errOut error = apiErr
 	if retryAfter := parseRetryAfter(resp); retryAfter > 0 {
-		apiErr = &retryAfterError{err: apiErr, after: retryAfter}
+		errOut = &retryAfterError{err: apiErr, after: retryAfter}
 	}
-	if isRetryableStatus(resp.StatusCode) {
-		return nil, true, apiErr
+
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// Rate limited: rejected without being applied, safe for any request.
+		return nil, attemptRetryRateLimit, errOut
+	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
+		// A 5xx may be returned after the write committed.
+		return nil, attemptAmbiguous, errOut
+	default:
+		return nil, attemptFatal, errOut
 	}
-	return nil, false, apiErr
+}
+
+// APIError reports a non-2xx Notion response.
+type APIError struct {
+	Status int
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("notion API error (status %d): %s", e.Status, e.Body)
+}
+
+// MayHaveBeenSaved reports that a server error may have arrived after Notion
+// committed the write. Client errors (4xx) mean the request was rejected.
+func (e *APIError) MayHaveBeenSaved() bool {
+	return e.Status >= 500 && e.Status <= 599
+}
+
+// ambiguousWriteError marks a failure where a non-idempotent request may have
+// been applied even though no successful response was read.
+type ambiguousWriteError struct{ err error }
+
+func (e *ambiguousWriteError) Error() string { return e.err.Error() }
+func (e *ambiguousWriteError) Unwrap() error { return e.err }
+
+// MayHaveBeenSaved reports that the write may have been applied.
+//
+// It is a marker method rather than an exported type so callers in other
+// packages (the Telegram handler) can classify the failure through errors.As
+// without importing this adapter.
+func (e *ambiguousWriteError) MayHaveBeenSaved() bool { return true }
+
+// IsAmbiguousWriteError reports whether a failed non-idempotent write may still
+// have been applied by Notion.
+//
+// Callers must reconcile by reading the parent (does the page/database exist?)
+// instead of retrying: a retry creates a second object.
+func IsAmbiguousWriteError(err error) bool {
+	var ambiguous *ambiguousWriteError
+	if errors.As(err, &ambiguous) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status >= 500 && apiErr.Status <= 599
+	}
+	return false
+}
+
+// AmbiguousWriteError marks err as a write whose outcome is unknown.
+//
+// Adapters use it for a 2xx create whose body cannot be used (malformed JSON, no
+// object id): the object exists but cannot be addressed, which is exactly the
+// "may have been saved" case callers must reconcile instead of retrying.
+func AmbiguousWriteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if IsAmbiguousWriteError(err) {
+		return err
+	}
+	return &ambiguousWriteError{err: err}
 }
 
 // retryAfterError carries a server-provided delay for the next attempt.
@@ -189,16 +322,6 @@ func (c *Client) waitBeforeRetry(ctx context.Context, attempt int, lastErr error
 	}
 }
 
-// isRetryableStatus reports whether an HTTP status is worth another attempt.
-// 429 (rate limited) and 5xx (server-side) are transient; 4xx client errors
-// such as 400/403/404 are not and must surface immediately.
-func isRetryableStatus(status int) bool {
-	if status == http.StatusTooManyRequests {
-		return true
-	}
-	return status >= 500 && status <= 599
-}
-
 // parseRetryAfter reads a Retry-After header expressed in seconds.
 func parseRetryAfter(resp *http.Response) time.Duration {
 	value := resp.Header.Get("Retry-After")
@@ -213,13 +336,19 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 }
 
 // CreatePage creates a new page under a parent.
+//
+// Creates are not retried after ambiguous failures: a retry would create a
+// second page. Callers reconcile with IsAmbiguousWriteError instead.
 func (c *Client) CreatePage(ctx context.Context, payload map[string]interface{}) (json.RawMessage, error) {
-	return c.do(ctx, http.MethodPost, "/pages", payload)
+	return c.doCreate(ctx, "/pages", payload)
 }
 
 // CreateDatabase creates an inline database inside a page.
+//
+// Creates are not retried after ambiguous failures: a retry would create a
+// second database, splitting the member's trade history across two of them.
 func (c *Client) CreateDatabase(ctx context.Context, payload map[string]interface{}) (json.RawMessage, error) {
-	return c.do(ctx, http.MethodPost, "/databases", payload)
+	return c.doCreate(ctx, "/databases", payload)
 }
 
 // QueryDatabase queries a single page of a Notion database.

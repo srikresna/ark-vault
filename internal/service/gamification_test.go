@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,12 @@ type mockGamificationStore struct {
 	streaks  map[int64]*domain.StreakData
 	events   map[int64][]domain.XPEvent
 	grants   map[string]*domain.TradeXPGrant
+
+	commits   int   // CommitTradeRecord calls that reached the write set
+	commitErr error // when set, CommitTradeRecord fails without writing
+
+	adjustments int   // CommitTradeAdjustment calls that reached the write set
+	adjustErr   error // when set, CommitTradeAdjustment fails without writing
 }
 
 func newMockGamificationStore() *mockGamificationStore {
@@ -91,6 +98,68 @@ func (m *mockGamificationStore) SaveTradeXPGrant(_ context.Context, grant *domai
 
 func (m *mockGamificationStore) DeleteTradeXPGrant(_ context.Context, telegramID int64, tradeID string) error {
 	delete(m.grants, grantKey(telegramID, tradeID))
+	return nil
+}
+
+// CommitTradeRecord mirrors the Badger store's single-transaction semantics:
+// a failed commit leaves the maps untouched, and a successful one applies
+// every non-nil write.
+func (m *mockGamificationStore) CommitTradeRecord(ctx context.Context, profile *domain.GamificationProfile, streak *domain.StreakData, grant *domain.TradeXPGrant, event *domain.XPEvent) error {
+	if m.commitErr != nil {
+		return m.commitErr
+	}
+	m.commits++
+	if profile != nil {
+		if err := m.SaveProfile(ctx, profile); err != nil {
+			return err
+		}
+	}
+	if streak != nil {
+		if err := m.SaveStreak(ctx, streak); err != nil {
+			return err
+		}
+	}
+	if grant != nil && grant.TradeID != "" {
+		if err := m.SaveTradeXPGrant(ctx, grant); err != nil {
+			return err
+		}
+	}
+	if event != nil {
+		if err := m.AppendXPEvent(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CommitTradeAdjustment mirrors the Badger store's single-transaction
+// semantics: a failed commit leaves the maps untouched, and a successful one
+// applies every non-nil write plus the requested grant deletion.
+func (m *mockGamificationStore) CommitTradeAdjustment(ctx context.Context, profile *domain.GamificationProfile, event *domain.XPEvent, grant, deleteGrant *domain.TradeXPGrant) error {
+	if m.adjustErr != nil {
+		return m.adjustErr
+	}
+	m.adjustments++
+	if profile != nil {
+		if err := m.SaveProfile(ctx, profile); err != nil {
+			return err
+		}
+	}
+	if event != nil {
+		if err := m.AppendXPEvent(ctx, event); err != nil {
+			return err
+		}
+	}
+	if grant != nil && grant.TradeID != "" {
+		if err := m.SaveTradeXPGrant(ctx, grant); err != nil {
+			return err
+		}
+	}
+	if deleteGrant != nil && deleteGrant.TradeID != "" {
+		if err := m.DeleteTradeXPGrant(ctx, deleteGrant.TelegramID, deleteGrant.TradeID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -255,6 +324,12 @@ func TestGamificationService_AdjustXPForTradeChange(t *testing.T) {
 	if delta != 10 || prof.TotalXP != 25 {
 		t.Errorf("expected delta=+10 and TotalXP=25 after closing WIN 2.5R, got delta=%d TotalXP=%d", delta, prof.TotalXP)
 	}
+	if store.adjustments != 1 {
+		t.Fatalf("expected the edit to use exactly 1 atomic adjustment commit, got %d", store.adjustments)
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, "t1"); g == nil || g.Base != domain.XPTradeLogged+domain.XPWinHighRR {
+		t.Fatalf("grant after close = %+v, want Base %d", g, domain.XPTradeLogged+domain.XPWinHighRR)
+	}
 
 	// Delete the trade (newTrade == nil) -> delta is -20 XP (10 base + 10 win high RR)
 	prof, delta, err = svc.AdjustXPForTradeChange(ctx, memberID, closedWin, nil)
@@ -263,6 +338,12 @@ func TestGamificationService_AdjustXPForTradeChange(t *testing.T) {
 	}
 	if delta != -20 || prof.TotalXP != 5 {
 		t.Errorf("expected delta=-20 and TotalXP=5 after deleting trade, got delta=%d TotalXP=%d", delta, prof.TotalXP)
+	}
+	if store.adjustments != 2 {
+		t.Fatalf("expected the delete to use exactly 1 more atomic adjustment commit, got %d", store.adjustments)
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, "t1"); g != nil {
+		t.Fatalf("deleted trade's grant must be removed, got %+v", g)
 	}
 }
 
@@ -302,8 +383,36 @@ func TestGamificationService_AdjustXPForTradeChange_RespectsDailyCap(t *testing.
 	if prof.TotalXP != xpAtCap.TotalXP {
 		t.Fatalf("4th trade should earn 0 XP, got %d -> %d", xpAtCap.TotalXP, prof.TotalXP)
 	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, capped.ID); g == nil || g.Base != 0 || g.Screenshot != 0 {
+		t.Fatalf("capped trade grant = %+v, want a zero grant", g)
+	}
+	eventsBefore := len(store.events[memberID])
 
-	// Deleting the capped trade must not subtract anything.
+	// Editing a capped trade must not retroactively grant the new base.
+	editedCapped := &domain.Trade{ID: capped.ID, Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 3.0}
+	if _, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, capped, editedCapped); err != nil || delta != 0 {
+		t.Fatalf("editing a capped trade should adjust 0 XP, got delta=%d err=%v", delta, err)
+	}
+	if store.adjustments != 0 {
+		t.Fatalf("a zero-grant edit must not write anything, got %d commits", store.adjustments)
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, capped.ID); g == nil || g.Base != 0 || g.Screenshot != 0 {
+		t.Fatalf("zero-grant edit must leave the grant untouched, got %+v", g)
+	}
+
+	// A failed zero-delta commit must leave the grant in place for the retry.
+	store.adjustErr = errors.New("badger txn failed")
+	if _, _, err := svc.AdjustXPForTradeChange(ctx, memberID, capped, nil); err == nil {
+		t.Fatal("expected the failed zero-delta commit to surface an error")
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, capped.ID); g == nil {
+		t.Fatal("grant must survive a failed zero-delta delete")
+	}
+	store.adjustErr = nil
+
+	// Deleting the capped trade must not subtract anything, but must still
+	// remove its grant so a later reconciliation cannot mistake it for XP
+	// that was granted.
 	_, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, capped, nil)
 	if err != nil {
 		t.Fatalf("AdjustXPForTradeChange failed: %v", err)
@@ -311,9 +420,18 @@ func TestGamificationService_AdjustXPForTradeChange_RespectsDailyCap(t *testing.
 	if delta != 0 {
 		t.Errorf("deleting a capped trade should adjust 0 XP, got %d", delta)
 	}
+	if store.adjustments != 1 {
+		t.Fatalf("zero-delta delete must still commit exactly 1 grant deletion, got %d", store.adjustments)
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, capped.ID); g != nil {
+		t.Fatalf("capped trade's grant must be deleted, got %+v", g)
+	}
 	prof, _ = svc.GetProfile(ctx, memberID)
 	if prof.TotalXP != xpAtCap.TotalXP {
 		t.Errorf("TotalXP after capped-trade delete = %d, want %d", prof.TotalXP, xpAtCap.TotalXP)
+	}
+	if got := len(store.events[memberID]); got != eventsBefore {
+		t.Errorf("zero-delta delete must not append an XP event, got %d -> %d", eventsBefore, got)
 	}
 
 	// Deleting an uncapped trade still subtracts what was granted (10 base).
@@ -327,9 +445,166 @@ func TestGamificationService_AdjustXPForTradeChange_RespectsDailyCap(t *testing.
 	}
 }
 
+// TestGamificationService_AdjustXPForTradeChange_MissingGrantReconcilesNothing
+// pins the unknown-contribution rule for trades without a grant: a pre-grant
+// trade (or one whose record commit failed and whose zero grant could not be
+// written) must never be reconciled against a fabricated nominal base, because
+// that could subtract XP the member never received. Editing likewise grants
+// nothing, since no record proves what the trade contributed.
+func TestGamificationService_AdjustXPForTradeChange_MissingGrantReconcilesNothing(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	memberID := int64(8080)
+
+	// Legacy state: the XP is already on the profile, but no grant exists.
+	if err := store.SaveProfile(ctx, &domain.GamificationProfile{
+		TelegramID: memberID, TotalXP: 15, Level: 1, Title: "Retail",
+	}); err != nil {
+		t.Fatalf("SaveProfile failed: %v", err)
+	}
+
+	legacy := &domain.Trade{ID: "legacy-1", Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 1.0}
+	prof, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, legacy, nil)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange(delete) failed: %v", err)
+	}
+	if delta != 0 {
+		t.Errorf("deleting a grant-less trade must adjust 0 XP, got %d", delta)
+	}
+	if prof.TotalXP != 15 {
+		t.Errorf("TotalXP after grant-less delete = %d, want 15", prof.TotalXP)
+	}
+
+	closed := &domain.Trade{ID: "legacy-1", Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 3.0}
+	prof, delta, err = svc.AdjustXPForTradeChange(ctx, memberID, legacy, closed)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange(edit) failed: %v", err)
+	}
+	if delta != 0 || prof.TotalXP != 15 {
+		t.Errorf("editing a grant-less trade must not fabricate XP, got delta=%d TotalXP=%d", delta, prof.TotalXP)
+	}
+
+	if store.adjustments != 0 {
+		t.Fatalf("a grant-less reconciliation must not write anything, got %d commits", store.adjustments)
+	}
+	if len(store.events[memberID]) != 0 {
+		t.Fatalf("a grant-less reconciliation must not append XP events, got %+v", store.events[memberID])
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, "legacy-1"); g != nil {
+		t.Fatalf("a grant-less reconciliation must not fabricate a grant, got %+v", g)
+	}
+}
+
+// TestGamificationService_OnTradeRecordedFailureCompensatesWithZeroGrant pins
+// the failure path that motivated the unknown-contribution rule: the journal
+// trade can be saved in Notion while CommitTradeRecord fails, so no XP was
+// granted. The service records a zero grant best-effort, which lets a later
+// edit or delete reconcile the trade to "earned nothing" without subtracting
+// XP the member never received.
+func TestGamificationService_OnTradeRecordedFailureCompensatesWithZeroGrant(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	memberID := int64(5151)
+
+	trade := &domain.Trade{
+		ID:       "t-failed",
+		Date:     time.Now().In(timeutil.WIB),
+		Symbol:   "XAUUSD",
+		Status:   domain.StatusWin,
+		ResultRR: 2.0,
+	}
+
+	store.commitErr = errors.New("badger txn failed")
+	if _, err := svc.OnTradeRecorded(ctx, memberID, trade); err == nil {
+		t.Fatal("expected OnTradeRecorded to surface the commit failure")
+	}
+	if store.profiles[memberID] != nil || len(store.events[memberID]) != 0 {
+		t.Fatalf("failed record must grant nothing, got profile=%+v events=%+v", store.profiles[memberID], store.events[memberID])
+	}
+	comp, _ := store.GetTradeXPGrant(ctx, memberID, trade.ID)
+	if comp == nil || comp.Base != 0 || comp.Screenshot != 0 {
+		t.Fatalf("compensating grant = %+v, want a zero grant", comp)
+	}
+	if store.adjustments != 1 {
+		t.Fatalf("expected exactly 1 compensating commit, got %d", store.adjustments)
+	}
+
+	// Editing the compensated trade must not retroactively grant the new base
+	// either: it never earned anything.
+	store.commitErr = nil
+	bigger := &domain.Trade{ID: trade.ID, Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 3.0}
+	if prof, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, trade, bigger); err != nil || delta != 0 || prof.TotalXP != 0 {
+		t.Fatalf("editing a compensated trade = (delta %d, TotalXP %d, err %v), want (0, 0, nil)", delta, prof.TotalXP, err)
+	}
+
+	// Deleting the Notion-saved trade must not subtract the XP it never got.
+	prof, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, trade, nil)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange failed: %v", err)
+	}
+	if delta != 0 || prof.TotalXP != 0 {
+		t.Errorf("deleting a compensated trade = (delta %d, TotalXP %d), want (0, 0)", delta, prof.TotalXP)
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, trade.ID); g != nil {
+		t.Fatalf("compensated trade's grant must be removed on delete, got %+v", g)
+	}
+	if len(store.events[memberID]) != 0 {
+		t.Fatalf("zero-delta delete must not append XP events, got %+v", store.events[memberID])
+	}
+}
+
+// TestGamificationService_OnTradeRecordedFailureWithoutCompensationIsSafe pins
+// the fallback when even the compensating zero-grant write fails: the trade is
+// left grant-less, and a later delete still reconciles nothing instead of
+// subtracting a fabricated base.
+func TestGamificationService_OnTradeRecordedFailureWithoutCompensationIsSafe(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	memberID := int64(5252)
+
+	store.commitErr = errors.New("badger txn failed")
+	store.adjustErr = errors.New("badger txn failed")
+	trade := &domain.Trade{
+		ID:       "t-uncompensated",
+		Date:     time.Now().In(timeutil.WIB),
+		Symbol:   "XAUUSD",
+		Status:   domain.StatusWin,
+		ResultRR: 2.0,
+	}
+	if _, err := svc.OnTradeRecorded(ctx, memberID, trade); err == nil {
+		t.Fatal("expected OnTradeRecorded to surface the commit failure")
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, trade.ID); g != nil {
+		t.Fatalf("no grant should exist after a failed compensation, got %+v", g)
+	}
+
+	store.commitErr = nil
+	store.adjustErr = nil
+	prof, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, trade, nil)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange failed: %v", err)
+	}
+	if delta != 0 || prof.TotalXP != 0 {
+		t.Errorf("deleting a grant-less trade = (delta %d, TotalXP %d), want (0, 0)", delta, prof.TotalXP)
+	}
+	if store.adjustments != 0 {
+		t.Fatalf("grant-less reconciliation must not write anything, got %d commits", store.adjustments)
+	}
+	if len(store.events[memberID]) != 0 {
+		t.Fatalf("grant-less reconciliation must not append XP events, got %+v", store.events[memberID])
+	}
+}
+
 // TestGamificationService_ScreenshotXPAwardedAndSticky verifies that a trade
 // with an attached screenshot earns the screenshot bonus, and that the bonus
-// survives edits (edits cannot remove a screenshot, so it is never reconciled).
+// survives edits and deletion (edits cannot add or remove a screenshot, so it
+// is never reconciled).
 func TestGamificationService_ScreenshotXPAwardedAndSticky(t *testing.T) {
 	store := newMockGamificationStore()
 	svc := NewGamificationService(store)
@@ -371,6 +646,218 @@ func TestGamificationService_ScreenshotXPAwardedAndSticky(t *testing.T) {
 	}
 	if delta != 0 {
 		t.Errorf("LOSS RR edit changes no XP (bonus stays), got delta %d", delta)
+	}
+
+	// Deleting the trade reconciles only the adjustable base; the screenshot
+	// bonus is sticky and stays granted, while the grant itself is removed.
+	prof, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, edited, nil)
+	if err != nil {
+		t.Fatalf("AdjustXPForTradeChange delete failed: %v", err)
+	}
+	if delta != -domain.XPTradeLogged {
+		t.Errorf("deleting the screenshot trade should adjust %d, got %d", -domain.XPTradeLogged, delta)
+	}
+	wantAfterDelete := domain.XPScreenshot + domain.XPDailyStreak
+	if prof.TotalXP != wantAfterDelete {
+		t.Errorf("TotalXP after delete = %d, want %d (screenshot + streak remain)", prof.TotalXP, wantAfterDelete)
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, "t-shot"); g != nil {
+		t.Fatalf("deleted trade's grant must be removed, got %+v", g)
+	}
+	if store.adjustments != 1 {
+		t.Fatalf("expected exactly 1 atomic adjustment commit (the delete), got %d", store.adjustments)
+	}
+}
+
+// TestGamificationService_AdjustXPForTradeChange_DeleteCommitFailureIsAtomic
+// pins that deleting a trade writes its profile, XP event and grant deletion
+// through one commit: when the commit fails none of them change, and the next
+// attempt still reconciles the full grant.
+func TestGamificationService_AdjustXPForTradeChange_DeleteCommitFailureIsAtomic(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	memberID := int64(6161)
+
+	trade := &domain.Trade{
+		ID:       "t-del",
+		Date:     time.Now().In(timeutil.WIB),
+		Symbol:   "XAUUSD",
+		Status:   domain.StatusWin,
+		ResultRR: 2.0,
+	}
+	if _, err := svc.OnTradeRecorded(ctx, memberID, trade); err != nil {
+		t.Fatalf("OnTradeRecorded failed: %v", err)
+	}
+
+	beforeProfile := *store.profiles[memberID]
+	beforeGrant := *store.grants[grantKey(memberID, trade.ID)]
+	beforeEvents := append([]domain.XPEvent(nil), store.events[memberID]...)
+
+	store.adjustErr = errors.New("badger txn failed")
+	prof, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, trade, nil)
+	if err == nil {
+		t.Fatal("expected the failed commit to surface an error")
+	}
+	if prof != nil || delta != 0 {
+		t.Fatalf("failed commit returned (%+v, %d), want (nil, 0)", prof, delta)
+	}
+	if store.adjustments != 0 {
+		t.Fatalf("failed commit must not count as applied, got %d", store.adjustments)
+	}
+	if got := *store.profiles[memberID]; got != beforeProfile {
+		t.Fatalf("profile changed despite failed commit: %+v -> %+v", beforeProfile, got)
+	}
+	if got := store.grants[grantKey(memberID, trade.ID)]; got == nil || *got != beforeGrant {
+		t.Fatalf("grant changed despite failed commit: %+v -> %+v", beforeGrant, got)
+	}
+	if !reflect.DeepEqual(store.events[memberID], beforeEvents) {
+		t.Fatalf("XP events changed despite failed commit: %+v -> %+v", beforeEvents, store.events[memberID])
+	}
+
+	// The grant survived, so the retry reconciles the full granted base.
+	store.adjustErr = nil
+	prof, delta, err = svc.AdjustXPForTradeChange(ctx, memberID, trade, nil)
+	if err != nil {
+		t.Fatalf("retry AdjustXPForTradeChange failed: %v", err)
+	}
+	wantDelta := -(domain.XPTradeLogged + domain.XPWinHighRR)
+	if delta != wantDelta {
+		t.Errorf("retry delta = %d, want %d", delta, wantDelta)
+	}
+	if prof.TotalXP != beforeProfile.TotalXP+wantDelta {
+		t.Errorf("retry TotalXP = %d, want %d", prof.TotalXP, beforeProfile.TotalXP+wantDelta)
+	}
+	if g, _ := store.GetTradeXPGrant(ctx, memberID, trade.ID); g != nil {
+		t.Fatalf("grant must be deleted after the successful retry, got %+v", g)
+	}
+	if store.adjustments != 1 {
+		t.Fatalf("expected exactly 1 successful adjustment commit, got %d", store.adjustments)
+	}
+}
+
+// TestGamificationService_AdjustXPForTradeChange_EditCommitFailureKeepsOldGrant
+// pins the edit direction: a failed commit must leave the old grant and XP
+// untouched, so the retry computes the delta from the original grant.
+func TestGamificationService_AdjustXPForTradeChange_EditCommitFailureKeepsOldGrant(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	memberID := int64(7171)
+
+	open := &domain.Trade{
+		ID:     "t-edit",
+		Date:   time.Now().In(timeutil.WIB),
+		Symbol: "XAUUSD",
+		Status: domain.StatusOpen,
+	}
+	if _, err := svc.OnTradeRecorded(ctx, memberID, open); err != nil {
+		t.Fatalf("OnTradeRecorded failed: %v", err)
+	}
+	beforeProfile := *store.profiles[memberID]
+	beforeEvents := append([]domain.XPEvent(nil), store.events[memberID]...)
+
+	closed := &domain.Trade{ID: open.ID, Symbol: "XAUUSD", Status: domain.StatusWin, ResultRR: 2.0}
+	store.adjustErr = errors.New("badger txn failed")
+	if _, _, err := svc.AdjustXPForTradeChange(ctx, memberID, open, closed); err == nil {
+		t.Fatal("expected the failed commit to surface an error")
+	}
+	if got := *store.profiles[memberID]; got != beforeProfile {
+		t.Fatalf("profile changed despite failed commit: %+v -> %+v", beforeProfile, got)
+	}
+	if g := store.grants[grantKey(memberID, open.ID)]; g == nil || g.Base != domain.XPTradeLogged {
+		t.Fatalf("old grant changed despite failed commit: %+v", g)
+	}
+	if !reflect.DeepEqual(store.events[memberID], beforeEvents) {
+		t.Fatalf("XP events changed despite failed commit: %+v -> %+v", beforeEvents, store.events[memberID])
+	}
+
+	store.adjustErr = nil
+	prof, delta, err := svc.AdjustXPForTradeChange(ctx, memberID, open, closed)
+	if err != nil {
+		t.Fatalf("retry AdjustXPForTradeChange failed: %v", err)
+	}
+	if delta != domain.XPWinHighRR || prof.TotalXP != beforeProfile.TotalXP+domain.XPWinHighRR {
+		t.Errorf("retry delta/TotalXP = %d/%d, want %d/%d", delta, prof.TotalXP, domain.XPWinHighRR, beforeProfile.TotalXP+domain.XPWinHighRR)
+	}
+	if g := store.grants[grantKey(memberID, open.ID)]; g == nil || g.Base != domain.XPTradeLogged+domain.XPWinHighRR {
+		t.Fatalf("retry grant = %+v, want Base %d", g, domain.XPTradeLogged+domain.XPWinHighRR)
+	}
+	if store.adjustments != 1 {
+		t.Fatalf("expected exactly 1 successful adjustment commit, got %d", store.adjustments)
+	}
+}
+
+// TestGamificationService_OnTradeRecordedCommitsAtomically pins that a recorded
+// trade's profile, streak, XP grant and XP event are written through a single
+// store commit, and that a failed commit leaves none of the four applied.
+func TestGamificationService_OnTradeRecordedCommitsAtomically(t *testing.T) {
+	store := newMockGamificationStore()
+	svc := NewGamificationService(store)
+
+	ctx := context.Background()
+	memberID := int64(9001)
+
+	trade := &domain.Trade{
+		ID:       "t-atomic",
+		Date:     time.Now().In(timeutil.WIB),
+		Symbol:   "XAUUSD",
+		Status:   domain.StatusWin,
+		ResultRR: 2.0,
+	}
+	res, err := svc.OnTradeRecorded(ctx, memberID, trade)
+	if err != nil {
+		t.Fatalf("OnTradeRecorded failed: %v", err)
+	}
+	if store.commits != 1 {
+		t.Fatalf("expected exactly 1 atomic commit per recorded trade, got %d", store.commits)
+	}
+	if prof := store.profiles[memberID]; prof == nil || prof.TotalXP != res.TotalXP {
+		t.Fatalf("committed profile = %+v, want TotalXP %d", prof, res.TotalXP)
+	}
+	if store.streaks[memberID] == nil {
+		t.Fatal("streak was not committed with the trade")
+	}
+	grant := store.grants[grantKey(memberID, "t-atomic")]
+	if wantBase := domain.XPTradeLogged + domain.XPWinHighRR; grant == nil || grant.Base != wantBase {
+		t.Fatalf("committed grant = %+v, want Base %d", grant, wantBase)
+	}
+	if len(store.events[memberID]) != 1 || store.events[memberID][0].Amount != res.XPGained {
+		t.Fatalf("committed events = %+v, want one event of %d XP", store.events[memberID], res.XPGained)
+	}
+
+	// A failed transaction must not apply any of the four writes: a profile
+	// that advanced without its grant would let a later delete subtract XP the
+	// member never received. The only write that follows is the best-effort
+	// zero grant that records "this trade earned nothing".
+	beforeXP := store.profiles[memberID].TotalXP
+	beforeStreak := *store.streaks[memberID]
+	beforeEvents := len(store.events[memberID])
+	store.commitErr = errors.New("badger txn failed")
+
+	failing := &domain.Trade{
+		ID:       "t-fail",
+		Date:     time.Now().In(timeutil.WIB),
+		Symbol:   "XAUUSD",
+		Status:   domain.StatusLoss,
+		ResultRR: -1.0,
+	}
+	if _, err := svc.OnTradeRecorded(ctx, memberID, failing); err == nil {
+		t.Fatal("expected OnTradeRecorded to surface the commit failure")
+	}
+	if prof := store.profiles[memberID]; prof == nil || prof.TotalXP != beforeXP {
+		t.Fatalf("profile changed despite failed commit: %+v", prof)
+	}
+	if got := *store.streaks[memberID]; got != beforeStreak {
+		t.Fatalf("streak changed despite failed commit: %+v", got)
+	}
+	if comp := store.grants[grantKey(memberID, "t-fail")]; comp == nil || comp.Base != 0 || comp.Screenshot != 0 {
+		t.Fatalf("failed record must leave a zero grant (earned nothing), got %+v", comp)
+	}
+	if len(store.events[memberID]) != beforeEvents {
+		t.Fatalf("XP events changed despite failed commit: %d -> %d", beforeEvents, len(store.events[memberID]))
 	}
 }
 
