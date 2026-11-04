@@ -1,6 +1,7 @@
 import { Effect } from 'effect'
 import { Runtime } from 'foldkit'
 
+import './styles.css'
 import { LoadSession } from './command'
 import { Flags, init } from './main'
 import { Message } from './message'

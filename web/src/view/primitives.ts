@@ -109,8 +109,8 @@ export const statsSummary = (
   Option.match(stats, {
     onNone: () => [
       { label: 'Trade', value: '0' },
-      { label: 'Win rate', value: '—' },
-      { label: 'Total R', value: '—' },
+      { label: 'Win rate', value: '-' },
+      { label: 'Total R', value: '-' },
     ],
     onSome: s => [
       { label: 'Trade', value: String(s.TotalTrades) },
@@ -122,7 +122,9 @@ export const statsSummary = (
     ],
   })
 
-export const tradeTableHead = (h: H): Html =>
+/** tradeTableHead renders the journal header. `withActions` must match the rows:
+ *  a header cell with no matching body cell is a dead column. */
+export const tradeTableHead = (withActions: boolean, h: H): Html =>
   h.thead(
     [],
     [
@@ -134,17 +136,18 @@ export const tradeTableHead = (h: H): Html =>
           h.th([], ['Status']),
           h.th([], ['Tanggal']),
           h.th([h.Class('right')], ['Hasil']),
-          h.th([], ['Aksi']),
+          ...(withActions ? [h.th([], ['Aksi'])] : []),
         ],
       ),
     ],
   )
 
 /** tradeRows renders a trade table body. Every cell carries data-label so the
- *  mobile layout can turn rows into labelled cards without a second markup. */
+ *  mobile layout can turn rows into labelled cards without a second markup.
+ *  A nil onDelete omits the action column entirely, for read-only tables. */
 export const tradeRows = (
   trades: ReadonlyArray<Trade>,
-  onDelete: (id: string) => Html,
+  onDelete: ((id: string) => Html) | null,
   h: H,
 ): Html =>
   h.tbody(
@@ -161,7 +164,9 @@ export const tradeRows = (
             [h.Class('right'), h.DataAttribute('label', 'Hasil')],
             [h.span([h.Class('num')], [formatRR(trade.result_rr)])],
           ),
-          h.td([h.DataAttribute('label', 'Aksi')], [onDelete(trade.id)]),
+          ...(onDelete === null
+            ? []
+            : [h.td([h.DataAttribute('label', 'Aksi')], [onDelete(trade.id)])]),
         ],
       ),
     ),

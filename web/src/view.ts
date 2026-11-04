@@ -3,10 +3,11 @@ import { AsyncData } from 'foldkit'
 import { Dialog } from '@foldkit/ui'
 import type { Document, Html, HtmlBuilder } from 'foldkit/html'
 
+import { badgeLabel } from './domain/badges'
 import type { LeaderboardEntry, Member } from './domain/api'
 import { Message } from './message'
 import type { Model, Notice, TradeForm } from './model'
-import { AppRoute, navItems, path } from './route'
+import { AppRoute, isPublicRoute, navItems, path } from './route'
 import { TelegramLogin } from './view/telegramLogin'
 import {
   countOpen,
@@ -212,8 +213,8 @@ const dashboardPage = (model: Model, h: H): Html =>
                     : h.table(
                         [],
                         [
-                          tradeTableHead(h),
-                          tradeRows(recent, () => h.empty, h),
+                          tradeTableHead(false, h),
+                          tradeRows(recent, null, h),
                         ],
                       ),
                 ],
@@ -433,7 +434,7 @@ const journalPage = (model: Model, h: H): Html =>
                 : h.table(
                     [],
                     [
-                      tradeTableHead(h),
+                      tradeTableHead(true, h),
                       tradeRows(
                         trades,
                         id =>
@@ -526,7 +527,7 @@ const statsPage = (model: Model, h: H): Html =>
                 [
                   summary(statsSummary(Option.some(stats)), h),
                   panel(
-                    'Per pair',
+                    'Per aset',
                     [
                       h.table(
                         [],
@@ -537,7 +538,7 @@ const statsPage = (model: Model, h: H): Html =>
                               h.tr(
                                 [],
                                 [
-                                  h.th([], ['Pair']),
+                                  h.th([], ['Aset']),
                                   h.th([h.Class('right')], ['Trade']),
                                   h.th([h.Class('right')], ['Win rate']),
                                   h.th([h.Class('right')], ['Total R']),
@@ -551,7 +552,7 @@ const statsPage = (model: Model, h: H): Html =>
                               h.tr(
                                 [h.Key(asset)],
                                 [
-                                  h.td([h.DataAttribute('label', 'Pair')], [asset]),
+                                  h.td([h.DataAttribute('label', 'Aset')], [asset]),
                                   h.td(
                                     [
                                       h.Class('right'),
@@ -645,7 +646,7 @@ const profilePage = (model: Model, h: H): Html =>
                   {
                     label: 'Streak terpanjang',
                     value: Option.match(payload.streak, {
-                      onNone: () => '—',
+                      onNone: () => '-',
                       onSome: s => `${s.longest_streak} hari`,
                     }),
                   },
@@ -669,7 +670,7 @@ const profilePage = (model: Model, h: H): Html =>
                             payload.badges.map(badge =>
                               h.span(
                                 [h.Class('badge'), h.Key(badge.badge_id)],
-                                [badge.badge_id],
+                                [badgeLabel(badge.badge_id)],
                               ),
                             ),
                           ),
@@ -810,10 +811,30 @@ const roleSelect = (
   )
 
 const adminPage = (model: Model, h: H): Html => {
-  const isOwner = Option.match(model.session, {
-    onNone: () => false,
-    onSome: member => member.role === 'owner',
+  const role = Option.match(model.session, {
+    onNone: () => 'member',
+    onSome: member => member.role,
   })
+  const isOwner = role === 'owner'
+  const canManage = role === 'admin' || role === 'owner'
+  // The nav hides Admin from a plain member, so reaching this page means a typed
+  // URL. Say why it is empty instead of rendering an unexplained blank table.
+  if (!canManage) {
+    return h.main(
+      [h.Class('shell')],
+      [
+        eyebrow('Administrasi', h),
+        h.h1([], ['Tidak ada akses']),
+        emptyState(
+          'Halaman ini hanya untuk admin komunitas.',
+          h.a([h.Class('btn'), h.Href(path(AppRoute.Dashboard()))], [
+            'Kembali ke dashboard',
+          ]),
+          h,
+        ),
+      ],
+    )
+  }
   return h.main(
     [h.Class('shell')],
     [
@@ -874,7 +895,7 @@ const adminPage = (model: Model, h: H): Html => {
                                 String(member.telegram_id),
                               ]),
                               h.td([h.DataAttribute('label', 'Discord')], [
-                                Option.getOrElse(member.discord_id, () => '—'),
+                                Option.getOrElse(member.discord_id, () => '-'),
                               ]),
                               h.td([h.DataAttribute('label', 'Role')], [
                                 roleSelect(member, isOwner, h),
@@ -930,9 +951,9 @@ const confirmDialog = (model: Model, h: H): Html =>
           [...render.dialog],
           render.isVisible
             ? [
-                h.div([...render.backdrop], []),
+                h.div([...render.backdrop, h.Class('dialog-backdrop')], []),
                 h.div(
-                  [...render.panel],
+                  [...render.panel, h.Class('dialog-panel')],
                   [
                     h.div(
                       [h.Class('panel-body')],
@@ -948,7 +969,12 @@ const confirmDialog = (model: Model, h: H): Html =>
                           [h.Class('actions')],
                           [
                             h.button(
-                              [...render.initialFocus, h.Class('btn-danger')],
+                              [
+                                ...render.initialFocus,
+                                h.Class('btn-danger'),
+                                h.Type('button'),
+                                h.OnClick(Message.ClickedConfirmDelete()),
+                              ],
                               ['Hapus trade'],
                             ),
                             h.button(
@@ -973,8 +999,14 @@ const confirmDialog = (model: Model, h: H): Html =>
 
 // --- root -------------------------------------------------------------------
 
-const body = (model: Model, h: H): Html =>
-  Match.value(model.route).pipe(
+/** A private route rendered before the session is known shows the login page:
+ *  the data requests would 401 and the member would see an error flash instead
+ *  of the sign-in form. */
+const body = (model: Model, h: H): Html => {
+  const route = Option.isSome(model.session) || isPublicRoute(model.route)
+    ? model.route
+    : AppRoute.Login()
+  return Match.value(route).pipe(
     Match.tagsExhaustive({
       Login: () => loginPage(model, h),
       Link: () => loginPage(model, h),
@@ -987,13 +1019,24 @@ const body = (model: Model, h: H): Html =>
       NotFound: () => notFoundPage(h),
     }),
   )
+}
 
-export const view = (model: Model, h: HtmlBuilder<Message>): Document => ({
-  title: model.route._tag === 'Login' ? 'Masuk · ARK Vault' : 'ARK Vault',
-  body:
-    model.route._tag === 'Login'
-      ? h.div([], [body(model, h), confirmDialog(model, h)])
-      : h.div([], [navBar(model, h), body(model, h), confirmDialog(model, h)]),
-})
+export const view = (model: Model, h: HtmlBuilder<Message>): Document => {
+  // The topbar belongs to a signed-in member: it lists private destinations and
+  // offers sign-out. Rendering it for a visitor who is not signed in would offer
+  // links that can only bounce back to the login form.
+  const chrome = Option.isSome(model.session)
+  return {
+    title: model.route._tag === 'Login' ? 'Masuk · ARK Vault' : 'ARK Vault',
+    body: h.div(
+      [],
+      [
+        ...(chrome ? [navBar(model, h)] : []),
+        body(model, h),
+        confirmDialog(model, h),
+      ],
+    ),
+  }
+}
 
 export { statusLabel, formatRR }

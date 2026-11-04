@@ -160,19 +160,12 @@ export const update = (model: Model, message: Message): UpdateReturn =>
     CompletedLoadExternal: () => ({ model }),
 
     LoadedSession: () => ({ model, commands: [LoadSession()] }),
-    SucceededLoadSession: ({ member }) => {
-      // Only a member who arrived on a private route is moved to the dashboard;
-      // one who deliberately opened /login stays there.
-      const route =
-        model.route._tag === 'Login' ? AppRoute.Dashboard() : model.route
-      return {
-        model: modifyFields(model, {
-          session: () => Option.some(member),
-          route: () => route,
-        }),
-        commands: commandsFor(route, model.statsPeriod),
-      }
-    },
+    SucceededLoadSession: ({ member }) => ({
+      model: modifyFields(model, { session: () => Option.some(member) }),
+      // Load whatever the deep link asked for. The route is already the URL's
+      // route, so signing in does not throw away where the member was going.
+      commands: commandsFor(model.route, model.statsPeriod),
+    }),
     FailedLoadSession: () => ({ model }),
 
     SucceededSignIn: ({ member }) => {
@@ -330,10 +323,6 @@ export const update = (model: Model, message: Message): UpdateReturn =>
     ClickedDeleteTrade: ({ id }) => ({
       model: modifyFields(model, { pendingDelete: () => Option.some(id) }),
       commands: [OpenConfirmDialog()],
-    }),
-    ClickedCancelDelete: () => ({
-      model: modifyFields(model, { pendingDelete: () => Option.none() }),
-      commands: [CloseConfirmDialog()],
     }),
     ClickedConfirmDelete: () =>
       Option.match(model.pendingDelete, {

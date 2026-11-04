@@ -423,22 +423,41 @@ tbody tr:hover {
 
 /* --- dialog --------------------------------------------------------------- */
 
+/* The dialog component supplies `position: fixed; inset: 0; margin: 0`, so it
+ * covers the viewport. Centre the panel ourselves instead of shrinking the
+ * element: shrinking it would fight the component's inline positioning and land
+ * the panel in the top-left corner. */
 dialog {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
+  border: none;
   padding: 0;
-  max-width: 420px;
-  width: calc(100% - 32px);
-  box-shadow: 0 12px 32px rgba(10, 10, 10, 0.16);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--ink);
-  background: var(--surface);
 }
 
 dialog::backdrop {
   background: rgba(10, 10, 10, 0.4);
 }
 
-dialog .panel-body {
+.dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 10, 10, 0.4);
+}
+
+.dialog-panel {
+  position: relative;
+  width: calc(100% - 32px);
+  max-width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 12px 32px rgba(10, 10, 10, 0.16);
+}
+
+.dialog-panel .panel-body {
   padding: 20px;
 }
 

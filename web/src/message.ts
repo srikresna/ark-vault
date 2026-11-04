@@ -56,7 +56,6 @@ export const Message = defineMessageUnion({
   FailedCreateTrade: { error: Schema.String },
   ClickedDeleteTrade: { id: Schema.String },
   ClickedConfirmDelete: {},
-  ClickedCancelDelete: {},
   SucceededDeleteTrade: { id: Schema.String },
   FailedDeleteTrade: { error: Schema.String },
 

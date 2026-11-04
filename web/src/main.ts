@@ -18,9 +18,12 @@ export type Flags = typeof Flags.Type
 export const init = (flags: Flags, url: Url): Model => {
   const route = urlToAppRoute(url)
   return {
-    // Every visitor starts signed out. The session cookie is HttpOnly, so the
-    // client cannot read it; a Command asks the server instead.
-    route: route._tag === 'Login' ? route : AppRoute.Login(),
+    // The URL is trusted here: the session cookie is HttpOnly, so whether the
+    // visitor is signed in is not known yet. The view renders Login for a
+    // private route until LoadSession answers, and ChangedUrl pins a signed-out
+    // visitor to the public pages. Forcing Login in init would throw away a
+    // deep link the member followed on purpose.
+    route: route._tag === 'NotFound' ? AppRoute.Login() : route,
     botUsername: flags.botUsername,
     session: Option.none(),
     dashboard: AsyncData.Idle(),
