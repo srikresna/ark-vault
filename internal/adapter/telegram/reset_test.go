@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/arkcode369/ark-vault/internal/domain"
@@ -18,12 +19,16 @@ import (
 // mockResettableMemberRepo is the member repository used by the reset tests. It
 // no longer performs the reset itself: storage is one transactional store, so
 // the handler calls the Resetter directly.
+//
+// The call counter is atomic because the dispatcher runs different users
+// concurrently, and a plain int races under -race even though the value is only
+// read after the bot stops.
 type mockResettableMemberRepo struct {
-	ensureCalls int
+	ensureCalls atomic.Int64
 }
 
 func (m *mockResettableMemberRepo) EnsureMember(_ context.Context, member *domain.Member) (*domain.Member, error) {
-	m.ensureCalls++
+	m.ensureCalls.Add(1)
 	return member, nil
 }
 

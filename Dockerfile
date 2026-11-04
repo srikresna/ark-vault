@@ -21,9 +21,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     ./cmd/bot
 
 # ------- Runtime -------
-FROM alpine:3.20
+FROM alpine:3.22
 
-# postgresql17-client provides pg_dump for the nightly logical backup.
+# alpine 3.22 is the oldest supported base that packages postgresql17-client;
+# pg_dump refuses to dump a newer server, so the client major must match the
+# postgres:17 server image.
 RUN apk --no-cache add ca-certificates tzdata postgresql17-client \
     && adduser -D -H -h /nonexistent appuser
 
