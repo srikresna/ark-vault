@@ -27,3 +27,6 @@ vendor/
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
+
+# Local migration binary
+/ark-migrate
