@@ -35,10 +35,12 @@ const (
 
 // Trade is the core domain entity for a single trade journal entry.
 type Trade struct {
-	ID            string // Notion page ID of the trade entry
-	MemberID      int64  // Telegram user ID
+	// ID is the storage identifier of the trade (a Notion page id before the
+	// Postgres migration, a uuid after it).
+	ID            string
+	MemberID      int64 // Telegram user ID
 	Date          time.Time
-	CreatedAt     time.Time // Notion page creation time; tie-breaker for "latest trade"
+	CreatedAt     time.Time // Creation time; tie-breaker for "latest trade"
 	AssetType     AssetType
 	Symbol        string
 	Direction     Direction
@@ -47,7 +49,11 @@ type Trade struct {
 	TimeWindow    TimeWindow
 	Confluence    string
 	Notes         string
-	ScreenshotURL string // URL after uploaded to Notion
+	ScreenshotURL string // Storage key or URL of the attached screenshot
+	// SourceUpdateID is the Telegram update that produced this trade, used to
+	// make a redelivered update idempotent instead of journaling twice. Zero
+	// means unknown (a trade recorded before the ledger, or imported).
+	SourceUpdateID int64
 }
 
 // Validate performs basic checks on the trade before persisting.

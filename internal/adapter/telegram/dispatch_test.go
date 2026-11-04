@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arkcode369/ark-vault/internal/adapter/badger"
 	"github.com/arkcode369/ark-vault/internal/domain"
 	"github.com/arkcode369/ark-vault/internal/service"
 )
@@ -753,20 +752,15 @@ func newLedgerHarness(replay *replayGuard, handle func(context.Context, Update))
 	return h
 }
 
-// TestReplayPrefixMatchesResetPreservation pins the contract between the ledger
-// and badger.Store.Reset: every key the ledger writes must live under the prefix
-// Reset preserves, or /reset would silently re-enable replay.
-func TestReplayPrefixMatchesResetPreservation(t *testing.T) {
-	if !strings.HasPrefix(replayClaimPrefix, badger.IdempotencyPrefix) {
-		t.Fatalf("claim prefix %q is not preserved by Store.Reset (prefix %q)", replayClaimPrefix, badger.IdempotencyPrefix)
-	}
-	if !strings.HasPrefix(replayNoticePrefix, badger.IdempotencyPrefix) {
-		t.Fatalf("notice prefix %q is not preserved by Store.Reset (prefix %q)", replayNoticePrefix, badger.IdempotencyPrefix)
-	}
+// TestReplayKeysUseLedgerPrefix pins the ledger key convention. The Postgres
+// reset deletes user data tables by name and never touches replay_kv, so the
+// invariant that a /reset must not re-enable replay now lives in reset.go's
+// statement list; this test keeps the prefix itself from drifting.
+func TestReplayKeysUseLedgerPrefix(t *testing.T) {
 	g := newTestGuard(newMemReplayStore())
 	for _, key := range []string{g.claimKey(1), g.cursorKey(), g.noticeKey(1)} {
-		if !strings.HasPrefix(key, badger.IdempotencyPrefix) {
-			t.Fatalf("ledger key %q is not preserved by Store.Reset", key)
+		if !strings.HasPrefix(key, replayClaimPrefix) {
+			t.Fatalf("ledger key %q does not start with %q", key, replayClaimPrefix)
 		}
 	}
 }
@@ -4215,6 +4209,7 @@ func TestBot_ResetBarrierMatchesHandlerForPhotoCaption(t *testing.T) {
 	sender := NewSender(testBotToken)
 	sender.baseAPI = srv.URL + "/bot"
 	h := NewHandler(sender, Services{}, nil, nil, nil, NewRateLimiter(100, time.Minute), logger, 0, 99)
+	h.SetResetter(&recordingResetter{removed: 1})
 	defer h.Close()
 	b := &Bot{handler: h, logger: logger}
 

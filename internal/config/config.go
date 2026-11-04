@@ -9,10 +9,23 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	TelegramToken  string
-	NotionToken    string
-	NotionParentID string // The parent page ID under which member pages are created
-	LogLevel       string
+	TelegramToken string
+	LogLevel      string
+
+	// Postgres replaces the Notion journal and the BadgerDB gamification store.
+	// DATABASE_URL is the single required storage setting.
+	DatabaseURL string
+	// ImageDir is the local volume root for trade screenshots.
+	ImageDir string
+	// SessionSecret signs web session cookies.
+	SessionSecret string
+
+	// Discord OAuth (optional: the web app is disabled without it).
+	DiscordClientID     string
+	DiscordClientSecret string
+	DiscordRedirectURL  string
+	// PublicBaseURL is the origin the web app is served from.
+	PublicBaseURL string
 
 	// Report settings
 	ReportChatID    int64  // Group chat ID to post weekly reports to
@@ -24,9 +37,6 @@ type Config struct {
 	CommunityGroupID int64 // Telegram group ID to check membership against
 	OwnerID          int64 // Owner's Telegram user ID for contact link
 
-	// BadgerDB (Gamification Storage)
-	BadgerDBPath string
-
 	// Gemini AI
 	GeminiAPIKey string
 	GeminiModel  string // default "gemini-3.1-flash-lite-preview"
@@ -35,26 +45,33 @@ type Config struct {
 	RateLimitPerMin int // Max commands per user per minute. Default: 10
 	// Metrics & Health server (Prometheus exposition format)
 	MetricsAddr string // HTTP address to serve /metrics and /healthz. Default: :9102
+	// APIAddr serves the web API. Empty disables the web app.
+	APIAddr string // Default: :8080
 }
 
 // Load reads configuration from environment variables.
 func Load() (*Config, error) {
 	c := &Config{
-		TelegramToken:  strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		NotionToken:    strings.TrimSpace(os.Getenv("NOTION_TOKEN")),
-		NotionParentID: strings.TrimSpace(os.Getenv("NOTION_PARENT_PAGE_ID")),
-		LogLevel:       strings.TrimSpace(os.Getenv("LOG_LEVEL")),
-		ReportDay:      strings.TrimSpace(os.Getenv("REPORT_DAY")),
+		TelegramToken:       strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		LogLevel:            strings.TrimSpace(os.Getenv("LOG_LEVEL")),
+		DatabaseURL:         strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		ImageDir:            strings.TrimSpace(os.Getenv("IMAGE_DIR")),
+		SessionSecret:       strings.TrimSpace(os.Getenv("SESSION_SECRET")),
+		DiscordClientID:     strings.TrimSpace(os.Getenv("DISCORD_CLIENT_ID")),
+		DiscordClientSecret: strings.TrimSpace(os.Getenv("DISCORD_CLIENT_SECRET")),
+		DiscordRedirectURL:  strings.TrimSpace(os.Getenv("DISCORD_REDIRECT_URL")),
+		PublicBaseURL:       strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")),
+		ReportDay:           strings.TrimSpace(os.Getenv("REPORT_DAY")),
 	}
 
 	if c.TelegramToken == "" {
 		return nil, errors.New("TELEGRAM_BOT_TOKEN is required")
 	}
-	if c.NotionToken == "" {
-		return nil, errors.New("NOTION_TOKEN is required")
+	if c.DatabaseURL == "" {
+		return nil, errors.New("DATABASE_URL is required")
 	}
-	if c.NotionParentID == "" {
-		return nil, errors.New("NOTION_PARENT_PAGE_ID is required")
+	if c.ImageDir == "" {
+		c.ImageDir = "/data/images"
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
@@ -105,11 +122,6 @@ func Load() (*Config, error) {
 		c.OwnerID = id
 	}
 
-	c.BadgerDBPath = strings.TrimSpace(os.Getenv("BADGER_DB_PATH"))
-	if c.BadgerDBPath == "" {
-		c.BadgerDBPath = "/data/badger"
-	}
-
 	c.GeminiAPIKey = strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
 	c.GeminiModel = strings.TrimSpace(os.Getenv("GEMINI_MODEL"))
 	if c.GeminiModel == "" {
@@ -130,6 +142,13 @@ func Load() (*Config, error) {
 	c.MetricsAddr = strings.TrimSpace(os.Getenv("METRICS_ADDR"))
 	if c.MetricsAddr == "" {
 		c.MetricsAddr = ":9102"
+	}
+	c.APIAddr = strings.TrimSpace(os.Getenv("API_ADDR"))
+	if c.APIAddr == "" {
+		c.APIAddr = ":8080"
+	}
+	if c.DiscordClientID != "" && c.SessionSecret == "" {
+		return nil, errors.New("SESSION_SECRET is required when Discord OAuth is enabled")
 	}
 	return c, nil
 }

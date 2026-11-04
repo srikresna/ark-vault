@@ -9,3 +9,9 @@ coverage.out
 coverage.html
 .idea
 .vscode
+# Vendored Foldkit reference subtree: documentation and examples only, never
+# compiled into the bot.
+repos
+# Frontend sources build in their own image; the Go image only needs the API.
+web/node_modules
+web/dist

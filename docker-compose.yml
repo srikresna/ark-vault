@@ -1,25 +1,80 @@
 volumes:
   vault-data:
+  vault-images:
+  vault-pg:
 networks:
   default:
   monitoring:
     name: grafana_monitoring-net
     external: true
+  # Shared with the Nginx Proxy Manager stack so the web origin can reach the
+  # API without publishing a host port.
+  proxy:
+    name: nginx-net
+    external: true
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: ark-vault-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: arkvault
+      POSTGRES_USER: arkvault
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      # Deterministic collation so ORDER BY is stable across hosts.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    command:
+      # Sized for a 4 vCPU / 7 GB box that also runs ~18 other containers.
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=50
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_size=512MB
+    volumes:
+      - vault-pg:/var/lib/postgresql/data
+    # No published port: only the bot container reaches it over the private
+    # network. Use `docker exec` for administrative access.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arkvault -d arkvault"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
   bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: ark-vault-bot
     restart: unless-stopped
-    # Fetched updates are persisted to Badger (payload + fetch cursor in one
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Fetched updates are persisted to Postgres (payload + fetch cursor in one
     # transaction) before Telegram's offset advances, so polling never waits for
     # handlers. On shutdown Start gives handlers 8s, then cancels them and waits
-    # for every worker to exit before main closes the store; an aborted update
+    # for every worker to exit before main closes the pool; an aborted update
     # stays "running" in the ledger and the next start asks the user to verify
-    # it instead of replaying it. The grace must outlast that wait so a stuck
-    # handler is SIGKILLed before the store is closed underneath it.
+    # it instead of replaying it. The grace must outlast that wait.
     stop_grace_period: 30s
     env_file:
       - .env
@@ -35,18 +90,21 @@ services:
         max-size: "10m"
         max-file: "3"
     ports:
-      # Bound to host loopback only: /metrics and /healthz must not be
-      # reachable from outside the box. Prometheus scrapes the bot over the
-      # grafana_monitoring-net docker network (ark-vault-bot:9102), which is
-      # unaffected by this host binding.
+      # Bound to host loopback only: /metrics and /healthz must not be reachable
+      # from outside the box. Prometheus scrapes over grafana_monitoring-net.
       - "127.0.0.1:9102:9102"
+    expose:
+      # The web API is reached by Nginx Proxy Manager over the proxy network,
+      # never through a published host port.
+      - "8080"
     volumes:
-      - vault-data:/data/badger
+      - vault-images:/data/images
     networks:
       - default
       - monitoring
+      - proxy
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 256M
           cpus: "0.5"

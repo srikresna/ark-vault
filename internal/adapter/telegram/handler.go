@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/arkcode369/ark-vault/internal/domain"
 	"github.com/arkcode369/ark-vault/internal/service"
@@ -39,25 +38,13 @@ type Services struct {
 	PostTrade    *service.PostTradeService
 }
 
-// Resetter resets all BadgerDB state.
-type Resetter interface {
-	Reset() error
-}
-
-// NotionResetter archives all Notion member pages and clears the member cache.
-type NotionResetter interface {
-	ResetAll(ctx context.Context) (int, error)
-}
-
-// ResetFinalizer is implemented by a NotionResetter that can run a follow-up
-// step (the BadgerDB wipe) while its journaling lease is still held.
+// Resetter wipes the journal and gamification state for the owner-only /reset.
 //
-// Without it the reset releases the lease after archiving, so a journal write
-// can land between the archive and the store wipe — its mapping is then erased
-// by the wipe while its journal stays in Notion, and the next trade creates a
-// second journal for that member.
-type ResetFinalizer interface {
-	ResetAllWith(ctx context.Context, finalize func() error) (int, error)
+// It reports how many trades were removed so the owner sees the real effect.
+// Storage is a single transactional store now, so a reset either happens
+// completely or not at all; there is no second system that can be left behind.
+type Resetter interface {
+	ResetAll(ctx context.Context) (int, error)
 }
 
 // TradeEditField identifies which trade attribute is awaiting free-text input.
@@ -292,12 +279,6 @@ func isJournalMessage(text string) bool {
 	return strings.HasPrefix(strings.ToLower(text), "#journal")
 }
 
-// ambiguousWrite is implemented by errors whose write may have reached Notion
-// even though it was reported as failed.
-type ambiguousWrite interface {
-	MayHaveBeenSaved() bool
-}
-
 // RecordPanic accounts for a panic that escaped HandleUpdate. The dispatcher
 // recovers it (see Bot.logUpdatePanic) so the ledger can mark the update as
 // ambiguous instead of done.
@@ -309,14 +290,7 @@ func (h *Handler) RecordPanic(updateID int, r any) {
 }
 
 // tradeSaveFailureMessage explains a failed trade save.
-//
-// When the failure is ambiguous the trade may already exist: telling the user to
-// retry would duplicate it, so they are pointed at /history instead.
 func tradeSaveFailureMessage(err error) string {
-	var ambiguous ambiguousWrite
-	if errors.As(err, &ambiguous) && ambiguous.MayHaveBeenSaved() {
-		return "⚠️ Trade mungkin sudah tersimpan, tapi Notion tidak mengonfirmasi. Cek /history dulu — jangan kirim ulang sebelum memastikan."
-	}
 	return "❌ Gagal menyimpan trade. Silakan coba lagi."
 }
 
@@ -1164,59 +1138,29 @@ func (h *Handler) cmdReset(ctx context.Context, msg *Message, text string) {
 		},
 	}
 	prompt := "⚠️ <b>Konfirmasi Reset Total (Owner Only)</b>\n\n" +
-		"Tindakan ini akan:\n" +
-		"1. Menghapus seluruh data gamifikasi, XP, level, streak, badge, challenge, goal, reminder &amp; cache AI di <b>BadgerDB</b>.\n" +
-		"2. Mengarsipkan seluruh halaman jurnal member &amp; database trade di <b>Notion</b>.\n\n" +
+		"Tindakan ini akan menghapus permanen:\n" +
+		"1. Seluruh trade di jurnal semua member.\n" +
+		"2. Seluruh data gamifikasi: XP, level, streak, badge, challenge, goal, reminder &amp; cache AI.\n\n" +
+		"Akun member tetap ada, hanya isinya yang dikosongkan.\n\n" +
 		"Apakah Anda yakin?"
 	_, _ = h.sender.SendWithKeyboard(ctx, msg.Chat.ID, prompt, rows, msg.MessageThreadID)
 }
 
 func (h *Handler) executeReset(ctx context.Context, chatID int64, threadID int) {
-	archivedCount := 0
-
-	var badgerErr error
-	wipeBadger := func() error {
-		if h.resetter == nil {
-			return nil
-		}
-		badgerErr = h.resetter.Reset()
-		return badgerErr
-	}
-
-	if nr, ok := h.members.(NotionResetter); ok && nr != nil {
-		var err error
-		if rf, canHold := h.members.(ResetFinalizer); canHold {
-			// The BadgerDB wipe runs while the member repository still holds
-			// its journaling lease, so no journal write can slip between the
-			// archive and the wipe and be erased by it.
-			archivedCount, err = rf.ResetAllWith(ctx, wipeBadger)
-		} else {
-			archivedCount, err = nr.ResetAll(ctx)
-			if err == nil {
-				err = wipeBadger()
-			}
-		}
-		if err != nil {
-			if badgerErr != nil {
-				h.logger.Error("badger reset failed", "error", badgerErr)
-				_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("❌ Gagal mereset BadgerDB (%d halaman Notion sudah diarsipkan).", archivedCount), threadID)
-				return
-			}
-			// Stop before touching BadgerDB. Wiping gamification state while
-			// member journals survive in Notion leaves the two stores out of
-			// sync and cannot be undone by retrying /reset, whereas aborting
-			// here keeps every cache and profile intact for a retry.
-			h.logger.Error("notion reset failed", "error", err)
-			_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("❌ Reset dibatalkan: arsip Notion gagal (%d halaman diarsipkan). BadgerDB tidak diubah — silakan coba /reset lagi.", archivedCount), threadID)
-			return
-		}
-	} else if err := wipeBadger(); err != nil {
-		h.logger.Error("badger reset failed", "error", err)
-		_, _ = h.sender.SendText(ctx, chatID, fmt.Sprintf("❌ Gagal mereset BadgerDB (%d halaman Notion sudah diarsipkan).", archivedCount), threadID)
+	if h.resetter == nil {
+		_, _ = h.sender.SendText(ctx, chatID, "❌ Reset belum tersedia.", threadID)
 		return
 	}
-
-	msg := fmt.Sprintf("✅ <b>Reset selesai!</b>\n\n• BadgerDB: seluruh data gamifikasi &amp; cache dihapus\n• Notion: <b>%d</b> halaman jurnal diarsipkan", archivedCount)
+	removed, err := h.resetter.ResetAll(ctx)
+	if err != nil {
+		h.logger.Error("reset failed", "error", err)
+		_, _ = h.sender.SendText(ctx, chatID,
+			"❌ Reset gagal dan tidak ada data yang diubah. Silakan coba lagi.", threadID)
+		return
+	}
+	msg := fmt.Sprintf(
+		"✅ <b>Reset selesai!</b>\n\n• Jurnal: <b>%d</b> trade dihapus\n• Gamifikasi: XP, level, streak, badge, challenge, goal, reminder &amp; cache AI dihapus",
+		removed)
 	_, _ = h.sender.SendHTML(ctx, chatID, msg, threadID)
 }
 

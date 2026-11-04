@@ -2,29 +2,26 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
-	badgerdb "github.com/arkcode369/ark-vault/internal/adapter/badger"
 	"github.com/arkcode369/ark-vault/internal/adapter/exporter"
 	"github.com/arkcode369/ark-vault/internal/adapter/gemini"
-	"github.com/arkcode369/ark-vault/internal/adapter/notion"
+	"github.com/arkcode369/ark-vault/internal/adapter/postgres"
 	"github.com/arkcode369/ark-vault/internal/adapter/telegram"
+	"github.com/arkcode369/ark-vault/internal/api"
 	"github.com/arkcode369/ark-vault/internal/config"
 	"github.com/arkcode369/ark-vault/internal/domain"
 	"github.com/arkcode369/ark-vault/internal/scheduler"
 	"github.com/arkcode369/ark-vault/internal/service"
 	"github.com/arkcode369/ark-vault/pkg/timeutil"
-	"github.com/dgraph-io/badger/v4"
 )
 
 var version = "dev"
@@ -55,37 +52,40 @@ func main() {
 	slog.SetDefault(logger)
 
 	// BadgerDB for gamification & caching
-	store, err := badgerdb.OpenStore(cfg.BadgerDBPath)
+	// Postgres is the single system of record: it replaced the Notion journal
+	// and the BadgerDB gamification store.
+	db, err := postgres.Open(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		logger.Error("failed to open badger store", "error", err)
+		logger.Error("failed to open postgres", "error", err)
 		os.Exit(1)
 	}
-	defer func() { _ = store.Close() }()
+	defer db.Close()
 
-	// Notion adapters (with BadgerDB persistent member index & trade cache)
-	memberCacheRepo := badgerdb.NewMemberCacheRepo(store)
-	tradeCacheRepo := badgerdb.NewTradeCacheRepo(store)
-	notionClient := notion.NewClient(cfg.NotionToken)
-	memberRepo := notion.NewMemberRepo(notionClient, cfg.NotionParentID, memberCacheRepo)
-	tradeRepo := notion.NewTradeRepo(notionClient, memberRepo, tradeCacheRepo)
-	imageRepo := notion.NewImageRepo(notionClient)
+	imageRepo, err := postgres.NewImageStore(cfg.ImageDir)
+	if err != nil {
+		logger.Error("failed to open image store", "error", err)
+		os.Exit(1)
+	}
+
+	memberRepo := postgres.NewMemberRepo(db)
+	tradeRepo := postgres.NewTradeRepo(db, memberRepo)
 
 	// Services
 	journalSvc := service.NewJournalService(tradeRepo, memberRepo, imageRepo)
 	leaderboardSvc := service.NewLeaderboardService(tradeRepo, memberRepo)
 	reportSvc := service.NewReportService(tradeRepo, memberRepo)
-	gamRepo := badgerdb.NewGamificationRepo(store)
+	gamRepo := postgres.NewGamificationRepo(db, memberRepo)
 	gamSvc := service.NewGamificationService(gamRepo)
 
 	// Badge & Challenge services
-	badgeRepo := badgerdb.NewBadgeRepo(store)
-	challengeRepo := badgerdb.NewChallengeRepo(store)
+	badgeRepo := postgres.NewBadgeRepo(db, memberRepo)
+	challengeRepo := postgres.NewChallengeRepo(db)
 	badgeSvc := service.NewBadgeService(badgeRepo, tradeRepo, gamSvc)
 	challengeSvc := service.NewChallengeService(challengeRepo, tradeRepo, memberRepo, gamSvc, badgeSvc)
 
 	// Reminder & Goal services
-	reminderRepo := badgerdb.NewReminderRepo(store)
-	goalRepo := badgerdb.NewGoalRepo(store)
+	reminderRepo := postgres.NewReminderRepo(db, memberRepo)
+	goalRepo := postgres.NewGoalRepo(db, memberRepo)
 	reminderSvc := service.NewReminderService(reminderRepo, gamRepo, logger)
 	goalSvc := service.NewGoalService(goalRepo, tradeRepo, gamSvc, badgeSvc)
 
@@ -100,8 +100,8 @@ func main() {
 	}
 
 	// Analytics & Report Card services
-	analyticsCacheRepo := badgerdb.NewAnalyticsCacheRepo(store)
-	reportCardRepo := badgerdb.NewReportCardRepo(store)
+	analyticsCacheRepo := postgres.NewAnalyticsCacheRepo(db, memberRepo)
+	reportCardRepo := postgres.NewReportCardRepo(db, memberRepo)
 	var analyticsSvc *service.AnalyticsService
 	var reportCardSvc *service.ReportCardService
 	if aiAnalyzer != nil {
@@ -140,23 +140,53 @@ func main() {
 	// cursor in one transaction, so polling never waits for handlers and
 	// Telegram can forget an update only after this bot owns a copy. A
 	// redelivered update never runs twice, and an interrupted one is reported
-	// for manual verification. The ledger survives /reset (see
-	// badger.Store.Reset).
+	// for manual verification. The ledger lives in Postgres and survives /reset.
+	ledger := postgres.NewKV(db)
 	bot.SetReplayGuard(telegram.ReplayStoreFuncs{
 		GetFn: func(key string, dest interface{}) (bool, error) {
-			err := store.Get(key, dest)
-			if errors.Is(err, badger.ErrKeyNotFound) {
-				return false, nil
-			}
-			return err == nil, err
+			return ledger.Get(context.Background(), key, dest)
 		},
-		SetFn:        store.SetWithTTL,
-		DeleteFn:     store.Delete,
-		ScanFn:       store.Scan,
-		ApplyBatchFn: store.ApplyBatch,
+		SetFn: func(key string, value interface{}, ttl time.Duration) error {
+			return ledger.SetWithTTL(context.Background(), key, value, ttl)
+		},
+		DeleteFn: func(key string) error {
+			return ledger.Delete(context.Background(), key)
+		},
+		ScanFn: func(prefix string) ([][]byte, error) {
+			return ledger.Scan(context.Background(), prefix)
+		},
+		ApplyBatchFn: func(insertIfAbsent, put map[string][]byte) ([]string, error) {
+			return ledger.ApplyBatch(context.Background(), insertIfAbsent, put)
+		},
 	})
 	handler.SetBot(bot)
-	handler.SetResetter(store)
+	handler.SetResetter(postgres.NewResetter(db))
+
+	// Web CRM API. It shares the Postgres store and the same services the bot
+	// uses, so a trade recorded from the web goes through identical validation,
+	// XP and badge logic.
+	sessionRepo := postgres.NewSessionRepo(db)
+	apiSrv := api.New(api.Config{
+		TelegramToken:       cfg.TelegramToken,
+		DiscordClientID:     cfg.DiscordClientID,
+		DiscordClientSecret: cfg.DiscordClientSecret,
+		DiscordRedirectURL:  cfg.DiscordRedirectURL,
+		PublicBaseURL:       cfg.PublicBaseURL,
+		CookieSecure:        strings.HasPrefix(cfg.PublicBaseURL, "https://"),
+	}, api.Deps{
+		Members:     memberRepo,
+		Trades:      tradeRepo,
+		Gam:         gamRepo,
+		Badges:      badgeRepo,
+		Sessions:    sessionRepo,
+		Images:      imageRepo,
+		Journal:     journalSvc,
+		Leaderboard: leaderboardSvc,
+		GamService:  gamSvc,
+		PostTrade:   postTradeSvc,
+		BadgeSvc:    badgeSvc,
+		Logger:      logger,
+	})
 	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -327,21 +357,24 @@ func main() {
 		},
 	})
 
-	// Daily BadgerDB backup (03:00 WIB, keeps 7 daily snapshots)
+	// Daily Postgres backup (03:00 WIB, keeps 7 daily snapshots).
+	//
+	// The bot no longer owns its storage: Postgres does, and a logical dump is
+	// the portable artifact. The dump runs inside the container through pg_dump
+	// so no host-side client is required.
 	sched.Add(scheduler.Job{
-		Name:     "badger-daily-backup",
+		Name:     "postgres-daily-backup",
 		Interval: 1 * time.Hour,
-		Run: func(_ context.Context) error {
+		Run: func(ctx context.Context) error {
 			now := time.Now().In(timeutil.WIB)
-			if now.Hour() == 3 && sched.ShouldFire("badger-daily-backup", now) {
-				backupDir := filepath.Join(cfg.BadgerDBPath, "backups")
-				path, err := store.BackupToDir(backupDir, 7)
+			if now.Hour() == 3 && sched.ShouldFire("postgres-daily-backup", now) {
+				path, err := backupDatabase(ctx, cfg.DatabaseURL, cfg.ImageDir, now)
 				if err != nil {
-					logger.Error("badger daily backup failed", "error", err)
+					logger.Error("postgres daily backup failed", "error", err)
 					return err // unmarked → retried on the next tick/restart
 				}
-				sched.MarkFired("badger-daily-backup", now)
-				logger.Info("badger daily backup completed", "path", path)
+				sched.MarkFired("postgres-daily-backup", now)
+				logger.Info("postgres daily backup completed", "path", path)
 			}
 			return nil
 		},
@@ -349,10 +382,9 @@ func main() {
 
 	// Daily gamification pruning (04:00 WIB): XP events have no consumer older
 	// than a couple of months (daily cap = today, report cards = current and
-	// previous month), but they slow every scan and grow the Badger value log
-	// unboundedly under the 128M container limit. Trade-XP grants are exempt:
-	// they record what each trade actually earned and are still needed if that
-	// trade is edited or deleted later; they go away with the trade itself.
+	// previous month). Trade-XP grants are exempt: they record what each trade
+	// actually earned and are still needed if that trade is edited or deleted
+	// later; they go away with the trade itself.
 	sched.Add(scheduler.Job{
 		Name:     "gam-prune",
 		Interval: 1 * time.Hour,
@@ -377,10 +409,46 @@ func main() {
 	go sched.Start(ctx)
 	logger.Info("scheduler started")
 
+	// Web API listener. It is a separate server from the metrics one so a
+	// public origin never exposes /metrics, and the metrics port stays bound to
+	// loopback in compose.
+	if cfg.APIAddr != "" && cfg.APIAddr != "off" && cfg.APIAddr != "none" {
+		apiSrvHTTP := &http.Server{
+			Addr:              cfg.APIAddr,
+			Handler:           apiSrv,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		go func() {
+			logger.Info("api server listening", "addr", cfg.APIAddr)
+			if err := apiSrvHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("api server error", "error", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = apiSrvHTTP.Shutdown(shutdownCtx)
+		}()
+	}
+
 	// Stdlib-only Prometheus metrics & health server
 	if cfg.MetricsAddr != "" && cfg.MetricsAddr != "off" && cfg.MetricsAddr != "none" {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			// Readiness, not liveness: a process that is alive but cannot reach
+			// Postgres fails every journal write, and reporting healthy there
+			// would let a deploy gate pass on a broken bot.
+			pingCtx, pingCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer pingCancel()
+			if err := db.Ping(pingCtx); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("database unavailable\n"))
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok\n"))
 		})

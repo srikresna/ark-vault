@@ -23,17 +23,21 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # ------- Runtime -------
 FROM alpine:3.20
 
-RUN apk --no-cache add ca-certificates tzdata \
+# postgresql17-client provides pg_dump for the nightly logical backup.
+RUN apk --no-cache add ca-certificates tzdata postgresql17-client \
     && adduser -D -H -h /nonexistent appuser
 
 COPY --from=builder /ark-vault /usr/local/bin/ark-vault
 
-RUN mkdir -p /data/badger && chown appuser:appuser /data/badger
+RUN mkdir -p /data/images && chown -R appuser:appuser /data
 
 USER appuser
-EXPOSE 9102
+EXPOSE 9102 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD pgrep ark-vault || exit 1
+# Readiness, not liveness: the binary can be alive while Postgres is
+# unreachable, and a container that reports healthy in that state would pass a
+# deploy gate while every journal write fails.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:9102/healthz || exit 1
 
 ENTRYPOINT ["ark-vault"]
