@@ -1,0 +1,26 @@
+{
+  "name": "ark-vault-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@effect/platform-browser": "4.1.2",
+    "@foldkit/ui": "0.170.0",
+    "effect": "^4.1.2",
+    "foldkit": "0.170.0"
+  },
+  "devDependencies": {
+    "@foldkit/vite-plugin": "0.29.0",
+    "happy-dom": "^20.14.5",
+    "typescript": "^5.9.3",
+    "vite": "8.3.5",
+    "vitest": "^3.2.4"
+  }
+}

@@ -113,6 +113,9 @@ func (r *TradeRepo) UpdateTrade(ctx context.Context, memberID int64, trade *doma
 		trade.ID, mid, trade.Symbol, string(trade.Direction), trade.AssetType.String(),
 		string(trade.Status), trade.Date, trade.ResultRR, string(trade.TimeWindow),
 		trade.Confluence, trade.Notes, trade.ScreenshotURL)
+	if isInvalidUUID(err) {
+		return fmt.Errorf("update trade %s: %w", trade.ID, errNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("update trade %s: %w", trade.ID, err)
 	}
@@ -132,6 +135,9 @@ func (r *TradeRepo) DeleteTrade(ctx context.Context, memberID int64, tradeID str
 	tag, err := r.db.pool.Exec(ctx, `
 		UPDATE trades SET deleted_at = now(), updated_at = now()
 		 WHERE id = $1 AND member_id = $2 AND deleted_at IS NULL`, tradeID, mid)
+	if isInvalidUUID(err) {
+		return fmt.Errorf("delete trade %s: %w", tradeID, errNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("delete trade %s: %w", tradeID, err)
 	}
@@ -154,7 +160,9 @@ func (r *TradeRepo) GetTrade(ctx context.Context, memberID int64, tradeID string
 		  FROM trades
 		 WHERE id = $1 AND member_id = $2 AND deleted_at IS NULL`, tradeID, mid)
 	t, err := scanTrade(row)
-	if err == pgx.ErrNoRows {
+	if err == pgx.ErrNoRows || isInvalidUUID(err) {
+		// A malformed id cannot name a trade, so it is "not found", not a
+		// server error: Postgres rejects it at the type level.
 		return nil, nil
 	}
 	if err != nil {
@@ -172,6 +180,9 @@ func (r *TradeRepo) SetScreenshot(ctx context.Context, memberID int64, tradeID, 
 	tag, err := r.db.pool.Exec(ctx, `
 		UPDATE trades SET screenshot_key = $3, updated_at = now()
 		 WHERE id = $1 AND member_id = $2 AND deleted_at IS NULL`, tradeID, mid, key)
+	if isInvalidUUID(err) {
+		return fmt.Errorf("set screenshot for trade %s: %w", tradeID, errNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("set screenshot for trade %s: %w", tradeID, err)
 	}

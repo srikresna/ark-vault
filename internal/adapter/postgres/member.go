@@ -21,9 +21,17 @@ type MemberRepo struct {
 // NewMemberRepo builds the member repository.
 func NewMemberRepo(db *DB) *MemberRepo { return &MemberRepo{db: db} }
 
-// memberColumns is the shared projection so every read decodes the same fields.
-const memberColumns = `id::text, telegram_id, COALESCE(discord_id, ''), username,
-	first_name, role, joined_at, created_at, updated_at`
+// memberColumns returns the shared member projection qualified by a table alias.
+//
+// The qualifier is not optional: `id` exists on sessions and members alike, so an
+// unqualified projection makes every JOIN fail with "column reference is
+// ambiguous", which surfaced as every authenticated request returning 500.
+func memberColumns(alias string) string {
+	return alias + `.id::text, ` + alias + `.telegram_id,
+	COALESCE(` + alias + `.discord_id, ''), ` + alias + `.username,
+	` + alias + `.first_name, ` + alias + `.role, ` + alias + `.joined_at,
+	` + alias + `.created_at, ` + alias + `.updated_at`
+}
 
 func scanMember(row rowScanner) (*domain.Member, error) {
 	var m domain.Member
@@ -59,7 +67,7 @@ func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domai
 		       first_name = CASE WHEN EXCLUDED.first_name <> ''
 		                         THEN EXCLUDED.first_name ELSE members.first_name END,
 		       updated_at = now()
-		RETURNING `+memberColumns,
+		RETURNING `+memberColumns("members"),
 		m.TelegramID, m.Username, m.FirstName, joined)
 	out, err := scanMember(row)
 	if err != nil {
@@ -71,7 +79,7 @@ func (r *MemberRepo) EnsureMember(ctx context.Context, m *domain.Member) (*domai
 // GetMember returns the member for a Telegram ID, or nil when absent.
 func (r *MemberRepo) GetMember(ctx context.Context, telegramID int64) (*domain.Member, error) {
 	row := r.db.pool.QueryRow(ctx,
-		`SELECT `+memberColumns+` FROM members WHERE telegram_id = $1`, telegramID)
+		`SELECT `+memberColumns("members")+` FROM members WHERE telegram_id = $1`, telegramID)
 	m, err := scanMember(row)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -85,7 +93,7 @@ func (r *MemberRepo) GetMember(ctx context.Context, telegramID int64) (*domain.M
 // GetMemberByID returns the member for a surrogate ID, or nil when absent.
 func (r *MemberRepo) GetMemberByID(ctx context.Context, id string) (*domain.Member, error) {
 	row := r.db.pool.QueryRow(ctx,
-		`SELECT `+memberColumns+` FROM members WHERE id = $1`, id)
+		`SELECT `+memberColumns("members")+` FROM members WHERE id = $1`, id)
 	m, err := scanMember(row)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -102,7 +110,7 @@ func (r *MemberRepo) GetMemberByDiscordID(ctx context.Context, discordID string)
 		return nil, nil
 	}
 	row := r.db.pool.QueryRow(ctx,
-		`SELECT `+memberColumns+` FROM members WHERE discord_id = $1`, discordID)
+		`SELECT `+memberColumns("members")+` FROM members WHERE discord_id = $1`, discordID)
 	m, err := scanMember(row)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -146,7 +154,7 @@ func (r *MemberRepo) LinkDiscord(ctx context.Context, memberID, discordID string
 // between calls when several members have the same score.
 func (r *MemberRepo) ListMembers(ctx context.Context) ([]domain.Member, error) {
 	rows, err := r.db.pool.Query(ctx,
-		`SELECT `+memberColumns+` FROM members ORDER BY joined_at, telegram_id`)
+		`SELECT `+memberColumns("members")+` FROM members ORDER BY joined_at, telegram_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
 	}

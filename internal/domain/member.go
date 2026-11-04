@@ -38,11 +38,11 @@ type Member struct {
 	TelegramID int64
 	// DiscordID is an optional second login identity linked to the same member.
 	// Empty when the member has not connected Discord.
-	DiscordID  string
-	Username   string
-	FirstName  string
-	Role       Role
-	JoinDate   time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	DiscordID string
+	Username  string
+	FirstName string
+	Role      Role
+	JoinDate  time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }

@@ -107,7 +107,7 @@ func (r *SessionRepo) GetSessionMember(ctx context.Context, sessionID string) (*
 		return nil, nil
 	}
 	row := r.db.pool.QueryRow(ctx, `
-		SELECT `+memberColumns+`
+		SELECT `+memberColumns("m")+`
 		  FROM sessions s
 		  JOIN members m ON m.id = s.member_id
 		 WHERE s.id = $1 AND s.expires_at > now()`, sessionID)

@@ -44,7 +44,7 @@ type Trade struct {
 	AssetType     AssetType
 	Symbol        string
 	Direction     Direction
-	ResultRR      float64    // R multiple result (e.g. +2, -1, 0 for BE)
+	ResultRR      float64 // R multiple result (e.g. +2, -1, 0 for BE)
 	Status        TradeStatus
 	TimeWindow    TimeWindow
 	Confluence    string

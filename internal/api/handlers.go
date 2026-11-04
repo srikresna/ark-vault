@@ -37,21 +37,21 @@ func toMemberView(m *domain.Member) memberView {
 
 // tradeView is the wire shape of a trade.
 type tradeView struct {
-	ID             string  `json:"id"`
-	Symbol         string  `json:"symbol"`
-	Direction      string  `json:"direction"`
-	AssetType      string  `json:"asset_type"`
-	Status         string  `json:"status"`
-	Date           string  `json:"date"`
-	ResultRR       float64 `json:"result_rr"`
-	TimeWindow     string  `json:"time_window"`
-	Confluence     string  `json:"confluence"`
-	Notes          string  `json:"notes"`
-	HasScreenshot  bool    `json:"has_screenshot"`
-	ScreenshotURL  string  `json:"screenshot_url,omitempty"`
-	CreatedAt      string  `json:"created_at"`
-	OwnerID        string  `json:"owner_id,omitempty"`
-	OwnerUsername  string  `json:"owner_username,omitempty"`
+	ID            string  `json:"id"`
+	Symbol        string  `json:"symbol"`
+	Direction     string  `json:"direction"`
+	AssetType     string  `json:"asset_type"`
+	Status        string  `json:"status"`
+	Date          string  `json:"date"`
+	ResultRR      float64 `json:"result_rr"`
+	TimeWindow    string  `json:"time_window"`
+	Confluence    string  `json:"confluence"`
+	Notes         string  `json:"notes"`
+	HasScreenshot bool    `json:"has_screenshot"`
+	ScreenshotURL string  `json:"screenshot_url,omitempty"`
+	CreatedAt     string  `json:"created_at"`
+	OwnerID       string  `json:"owner_id,omitempty"`
+	OwnerUsername string  `json:"owner_username,omitempty"`
 }
 
 func toTradeView(t domain.Trade) tradeView {
@@ -316,7 +316,7 @@ func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request, member *d
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"member": toMemberView(target),
+		"member":  toMemberView(target),
 		"profile": profile,
 		"streak":  streak,
 		"badges":  badges,

@@ -28,10 +28,10 @@ type Config struct {
 	PublicBaseURL string
 
 	// Report settings
-	ReportChatID    int64  // Group chat ID to post weekly reports to
-	ReportThreadID  int    // Topic/thread ID for groups with Topics enabled (0 = General)
-	ReportDay       string // Day of week: "monday", "sunday", etc. Default: "sunday"
-	ReportHour      int    // Hour (0-23) to post report. Default: 20
+	ReportChatID   int64  // Group chat ID to post weekly reports to
+	ReportThreadID int    // Topic/thread ID for groups with Topics enabled (0 = General)
+	ReportDay      string // Day of week: "monday", "sunday", etc. Default: "sunday"
+	ReportHour     int    // Hour (0-23) to post report. Default: 20
 
 	// Community membership gate
 	CommunityGroupID int64 // Telegram group ID to check membership against
@@ -137,7 +137,6 @@ func Load() (*Config, error) {
 	} else {
 		c.RateLimitPerMin = 10
 	}
-
 
 	c.MetricsAddr = strings.TrimSpace(os.Getenv("METRICS_ADDR"))
 	if c.MetricsAddr == "" {
